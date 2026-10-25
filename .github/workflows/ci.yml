@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres
+      CLAIMS_OWNER_PASSWORD: owner_ci_password
+      CLAIMS_APP_PASSWORD: app_ci_password
+      DATABASE_URL: postgres://claims_app:app_ci_password@localhost:5432/claims_dev
+      DATABASE_OWNER_URL: postgres://claims_owner:owner_ci_password@localhost:5432/claims_dev
+      DB_SCHEMA: claims
+      TEST_DATABASE_URL: postgres://claims_owner:owner_ci_password@localhost:5432/claims_test
+      AUDIT_HMAC_KEY: ci-only-not-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - name: Validate both workflow versions
+        run: |
+          npm run cli -- config validate
+          npm run cli -- config validate config/examples/workflow.appeal.yaml
+      - name: Set up the database
+        run: |
+          npm run db:setup
+          npm run db:migrate
+          npm run db:seed
+      - run: npm test
+      - name: Scenarios
+        run: npm run scenarios
+      - run: npm run demo:tamper
+      - run: npm run build:web
