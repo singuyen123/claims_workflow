@@ -24,12 +24,16 @@ export const SCHEMA_RE = /^[a-z_][a-z0-9_]{0,62}$/;
 /** A pool whose connections all use `schema` as their search_path. */
 export function createPool(connectionString: string, schema: string, max = 10): pg.Pool {
   if (!SCHEMA_RE.test(schema)) throw new Error(`Invalid schema name '${schema}'`);
-  return new pg.Pool({
+  const pool = new pg.Pool({
     connectionString,
     max,
     types,
     options: `-c search_path=${schema} -c TimeZone=UTC`,
   });
+  // An idle connection dropped by the server (restart, timeout) must not crash the process;
+  // the pool replaces it on the next query.
+  pool.on('error', (error) => process.emitWarning(`PostgreSQL connection lost: ${error.message}`));
+  return pool;
 }
 
 export type Db = pg.Pool | pg.PoolClient;

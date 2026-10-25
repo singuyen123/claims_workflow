@@ -127,7 +127,13 @@ export class OutboxWorker {
       wake?.();
     };
     const onAbort = () => wake?.();
+    // If the LISTEN connection drops, notifications stop but polling keeps the worker going.
+    const onError = (error: Error) =>
+      this.log(
+        `[worker] notification connection lost (${error.message}); polling every ${this.options.pollMs ?? 2000} ms`,
+      );
     listener.on('notification', onNotify);
+    listener.on('error', onError);
     signal.addEventListener('abort', onAbort, { once: true });
     try {
       await listener.query(`LISTEN ${OUTBOX_CHANNEL}`);
@@ -136,8 +142,15 @@ export class OutboxWorker {
       );
       while (!signal.aborted) {
         pending = false;
-        const r = await this.processOnce();
-        if (r.leased > 0 || pending) continue;
+        let leased = 0;
+        try {
+          leased = (await this.processOnce()).leased;
+        } catch (error) {
+          // A database outage must not kill the worker: wait one poll interval and try again.
+          this.log(`[worker] round failed: ${(error as Error).message}`);
+          pending = false;
+        }
+        if (leased > 0 || pending) continue;
         await new Promise<void>((resolve) => {
           if (signal.aborted) return resolve();
           const timer = setTimeout(resolve, this.options.pollMs ?? 2000);
@@ -151,8 +164,13 @@ export class OutboxWorker {
     } finally {
       signal.removeEventListener('abort', onAbort);
       listener.off('notification', onNotify);
-      await listener.query(`UNLISTEN ${OUTBOX_CHANNEL}`).catch(() => undefined);
-      listener.release();
+      const unlistened = await listener.query(`UNLISTEN ${OUTBOX_CHANNEL}`).then(
+        () => true,
+        () => false,
+      );
+      listener.off('error', onError);
+      // A connection that could not UNLISTEN is broken: destroy it instead of returning it.
+      listener.release(!unlistened);
     }
   }
 }

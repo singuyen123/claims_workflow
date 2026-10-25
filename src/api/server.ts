@@ -20,7 +20,10 @@ async function main() {
   const stop = new AbortController();
   const worker = process.argv.includes('--no-worker')
     ? undefined
-    : app.createWorker({ log: (line) => console.log(line) }).run(stop.signal);
+    : app
+        .createWorker({ log: (line) => console.log(line) })
+        .run(stop.signal)
+        .catch((error: Error) => console.error(pc.red(`[worker] stopped: ${error.message}`)));
 
   const shutdown = async () => {
     stop.abort();
