@@ -1,0 +1,63 @@
+{
+  "name": "claims-workflow-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Config-driven claims workflow engine with RBAC/ABAC, tamper-evident audit trail and a transactional outbox on PostgreSQL",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "cli": "tsx src/cli/index.ts",
+    "worker": "tsx src/cli/index.ts worker",
+    "scenarios": "tsx src/scenarios/run.ts",
+    "db:setup": "tsx scripts/db-setup.ts",
+    "db:migrate": "tsx src/cli/index.ts db migrate",
+    "db:seed": "tsx src/cli/index.ts db seed",
+    "demo:tamper": "tsx scripts/tamper-demo.ts",
+    "config:validate": "tsx src/cli/index.ts config validate",
+    "config:schema": "tsx scripts/gen-json-schema.ts",
+    "api": "tsx src/api/server.ts",
+    "dev": "concurrently -n api,web -c blue,green \"tsx watch src/api/server.ts\" \"vite --config web/vite.config.ts\"",
+    "build:web": "vite build --config web/vite.config.ts",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "dependencies": {
+    "@clack/prompts": "1.8.1",
+    "@tanstack/react-query": "5.104.5",
+    "canonicalize": "5.1.0",
+    "cli-table3": "0.6.5",
+    "commander": "15.0.0",
+    "fast-json-patch": "3.1.1",
+    "fastify": "5.12.7",
+    "mermaid": "12.2.0",
+    "pg": "8.23.1",
+    "picocolors": "1.1.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "@vitest/coverage-v8": "5.0.5",
+    "concurrently": "10.0.6",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}
