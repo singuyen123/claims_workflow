@@ -185,7 +185,8 @@ export function typeAtPath(root: TypeNode, segments: readonly string[]): TypeRes
 export function refType(root: TypeNode, ref: string): TypeResult {
   const result = typeAtPath(root, ref.slice(1).split('.'));
   if (result.ok) return result;
-  const fullHint = suggestFullPath(root, ref);
+  // A whole-path suggestion only helps when the failing segment had no close match itself.
+  const fullHint = result.error.includes('Did you mean') ? '' : suggestFullPath(root, ref);
   return { ok: false, error: `${ref}: ${result.error}${fullHint}` };
 }
 

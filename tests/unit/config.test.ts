@@ -116,6 +116,15 @@ describe('workflow config: static validation', () => {
     );
   });
 
+  it('reports a broken shared rule once, naming every transition that uses it', () => {
+    const issues = issuesAfter((raw) => {
+      raw.rules.assessment_complete.path = '$claim.assesment.summary';
+    });
+    expect(issues).toEqual([
+      "rules.assessment_complete.path (used by transitions.approve.preconditions[0], transitions.reject.preconditions[0]): $claim.assesment.summary: unknown field 'assesment' in 'claim'. Did you mean 'assessment'?",
+    ]);
+  });
+
   it('rejects inputs a transition does not declare', () => {
     const issues = issuesAfter((raw) => {
       transition(raw, 'request_info').effects[0].value.description = '$input.reson';

@@ -74,6 +74,8 @@ class Validator {
   private readonly usedTemplates = new Set<string>();
   private readonly usedRules = new Set<string>();
   private readonly seen = new Set<string>();
+  /** Errors inside a named rule, reported once with every transition that uses the rule. */
+  private readonly ruleErrors = new Map<string, { issue: ConfigIssue; via: string[] }>();
 
   constructor(private readonly def: WorkflowDefinition) {
     this.env = buildTypeEnv(def);
@@ -94,6 +96,23 @@ class Validator {
   }
 
   private error(path: string, message: string) {
+    const arrow = path.lastIndexOf(' → ');
+    if (arrow > 0) {
+      const via = path.slice(0, arrow);
+      const rulePath = path.slice(arrow + 3);
+      const key = `${rulePath}\u0000${message}`;
+      const known = this.ruleErrors.get(key);
+      if (known) {
+        if (!known.via.includes(via)) known.via.push(via);
+      } else {
+        const issue = { path: rulePath, message };
+        this.ruleErrors.set(key, { issue, via: [via] });
+        this.errors.push(issue);
+      }
+      const entry = this.ruleErrors.get(key) as { issue: ConfigIssue; via: string[] };
+      entry.issue.path = `${rulePath} (used by ${entry.via.join(', ')})`;
+      return;
+    }
     const key = `${path}\u0000${message}`;
     if (this.seen.has(key)) return;
     this.seen.add(key);
