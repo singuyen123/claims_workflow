@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Mermaid SVGs scale with their container. */
+.diagram svg {
+  max-width: 100%;
+  height: auto;
+}
