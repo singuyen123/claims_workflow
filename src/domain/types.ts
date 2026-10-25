@@ -55,3 +55,65 @@ export interface JsonPatchOp {
   value?: unknown;
   from?: string;
 }
+
+/** One row of the append-only, hash-chained audit trail. */
+export interface AuditEntry {
+  entry_id: string;
+  claim_id: string;
+  claim_seq: number;
+  transition_id: string;
+  /** Null for the claim-creation entry. */
+  from_state: string | null;
+  to_state: string;
+  actor_user_id: string;
+  actor_role: string;
+  reason: string | null;
+  notes: string | null;
+  input: Record<string, unknown>;
+  /** RFC 6902 patch from the previous snapshot to this one. */
+  changes: JsonPatchOp[];
+  /** Values and checks the decision was based on, plus the config hash. */
+  decision_context: Record<string, unknown>;
+  effects: Array<Record<string, unknown>>;
+  config_hash: string;
+  claim_version: number;
+  /** SHA-256 of the claim snapshot after this entry. */
+  snapshot_hash: string;
+  prev_hash: string;
+  /** HMAC-SHA256 over every field above. */
+  hash: string;
+  occurred_at: string;
+}
+
+export interface DeniedAttempt {
+  id: number;
+  claim_id: string | null;
+  actor_user_id: string;
+  actor_role: string | null;
+  transition_id: string;
+  error_code: string;
+  message: string;
+  details: Record<string, unknown>;
+  occurred_at: string;
+}
+
+export type OutboxStatus = 'PENDING' | 'PROCESSING' | 'DONE' | 'FAILED' | 'DEAD';
+
+export interface OutboxMessage {
+  id: number;
+  claim_id: string;
+  audit_entry_id: string;
+  effect_type: 'notify' | 'trigger_payment' | 'log';
+  payload: Record<string, unknown>;
+  idempotency_key: string;
+  status: OutboxStatus;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string;
+  locked_by: string | null;
+  locked_until: string | null;
+  last_error: string | null;
+  result: Record<string, unknown> | null;
+  created_at: string;
+  processed_at: string | null;
+}
