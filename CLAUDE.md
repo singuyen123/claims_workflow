@@ -22,6 +22,7 @@ interprets that file; it contains no claim-specific logic.
 - `src/engine` is pure: no I/O, no `Date.now()`, no randomness. Time and ids are injected.
 - Never add workflow-specific behaviour (state names, transition ids, roles) to TypeScript.
   If a new behaviour is needed, add a generic condition/effect primitive and use it from config.
+  Only `tests/` and `src/scenarios/` (scripts that drive the shipped workflow) may name them.
 - Every config path (`$claim.x`, `{claim.x}`) must type-check in `src/engine/validate.ts`.
   When adding a primitive, extend the validator and add a test with a broken fixture.
 - The engine never reads audit history. Anything a rule needs (counters, participants,
