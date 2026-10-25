@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/docs/results", "!**/config/workflow.schema.json"]
+    "includes": ["**", "!**/docs/results", "!**/config/workflow.schema.json", "!**/*.md"]
   },
   "formatter": {
     "enabled": true,
