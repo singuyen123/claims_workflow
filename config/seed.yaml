@@ -1,0 +1,28 @@
+# Demo users and policies. Authentication is simulated: CLI/API callers say which user they are.
+# u_dual_* hold two roles each so segregation-of-duties rules can be demonstrated.
+
+users:
+  - { id: u_member_01, display_name: Member One, roles: [member], member_id: MEM-001 }
+  - { id: u_member_02, display_name: Member Two, roles: [member], member_id: MEM-002 }
+  - { id: u_clerk_01, display_name: Document Clerk, roles: [document_clerk] }
+  - { id: u_lead_01, display_name: Team Lead, roles: [team_lead] }
+  - { id: u_assessor_01, display_name: Assessor One, roles: [assessor] }
+  - { id: u_assessor_02, display_name: Assessor Two, roles: [assessor] }
+  - { id: u_finance_01, display_name: Finance Officer, roles: [finance] }
+  - { id: u_dual_ca, display_name: Clerk and Assessor, roles: [document_clerk, assessor] }
+  - { id: u_dual_af, display_name: Assessor and Finance, roles: [assessor, finance] }
+  - { id: svc_system, display_name: Workflow scheduler, roles: [system], service_account: true }
+
+policies:
+  - id: POL-001
+    member_id: MEM-001
+    product: Health Care Plus
+    coverage_limit: 100000000
+    effective_from: "2026-01-01"
+    effective_to: "2026-12-31"
+  - id: POL-002
+    member_id: MEM-002
+    product: Health Care Basic
+    coverage_limit: 5000000
+    effective_from: "2026-01-01"
+    effective_to: "2026-12-31"

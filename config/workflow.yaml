@@ -1,0 +1,563 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# Health-insurance reimbursement claim workflow (AI Challenge 14).
+#
+# Everything the engine does is declared here: states, transitions, roles, inputs, rules,
+# notifications and loop limits. The engine has no claim-specific code, so adding a state or a
+# transition only means editing this file (see docs/extending-the-workflow.md).
+#
+# References: `$claim.x`, `$policy.x`, `$actor.x`, `$input.x`, `$settings.x`, `$now`, `$uuid`.
+# Placeholders in messages and templates: `{claim.claim_no}`, `{claim.claimed_amount|money}`.
+
+workflow:
+  id: health_claim_reimbursement
+  version: 1
+  label: Health claim reimbursement
+  initial_state: SUBMITTED
+
+settings:
+  appeal_period:
+    type: duration
+    value: P30D
+    description: Window for the member to appeal a rejection (placeholder, to be confirmed by the business).
+  four_eyes_threshold:
+    type: money
+    value: 50000000
+    description: Approved amounts above this need a team lead co-sign (placeholder).
+  filing_deadline:
+    type: duration
+    value: P1Y
+    description: Claims must be filed within one year of treatment (Law on Insurance Business 2022, art. 30).
+
+limits:
+  max_actions_per_claim: 200
+
+roles:
+  member: { label: Member, description: Policyholder or insured person }
+  document_clerk: { label: Document clerk }
+  team_lead: { label: Team lead }
+  assessor: { label: Assessor }
+  finance: { label: Finance }
+  system: { label: System, service_account_only: true }
+
+enums:
+  document_type:
+    - claim_form
+    - medical_invoice
+    - prescription
+    - medical_record
+    - lab_result
+    - discharge_summary
+    - itemized_bill
+    - surgery_certificate
+  rejection_reason:
+    - not_covered
+    - exclusion
+    - waiting_period
+    - pre_existing_condition
+    - not_medically_necessary
+    - insufficient_documents
+    - policy_inactive
+    - other
+
+# Keys become the claim_type enum.
+document_requirements:
+  outpatient: [claim_form, medical_invoice, prescription]
+  inpatient: [claim_form, medical_invoice, discharge_summary, itemized_bill]
+
+# Claim data written by effects. Every path used in this file is type-checked against it.
+fields:
+  treatment_date: { type: date }
+  documents:
+    type: list
+    of:
+      type: object
+      fields:
+        type: { type: enum, enum: document_type }
+        file_name: { type: string }
+        received_at: { type: timestamp }
+        received_by: { type: user_ref }
+  info_requests:
+    type: list
+    of:
+      type: object
+      fields:
+        description: { type: text }
+        requested_by: { type: user_ref }
+        requested_at: { type: timestamp }
+  info_responses:
+    type: list
+    of:
+      type: object
+      fields:
+        text: { type: text }
+        received_at: { type: timestamp }
+        received_by: { type: user_ref }
+  assessor_id: { type: user_ref }
+  assigned_at: { type: timestamp }
+  assessment:
+    type: object
+    fields:
+      summary: { type: text }
+      approved_amount: { type: money }
+      submitted_by: { type: user_ref }
+      submitted_at: { type: timestamp }
+  cosign:
+    type: object
+    fields:
+      user_id: { type: user_ref }
+      amount: { type: money }
+      signed_at: { type: timestamp }
+  rejection:
+    type: object
+    fields:
+      reason_code: { type: enum, enum: rejection_reason }
+      reason: { type: text }
+      rejected_at: { type: timestamp }
+      appeal_deadline: { type: timestamp }
+      acknowledged_at: { type: timestamp }
+  payment_request:
+    type: object
+    fields:
+      id: { type: uuid }
+      amount: { type: money }
+      created_at: { type: timestamp }
+  payment:
+    type: object
+    fields:
+      confirmation_ref: { type: string }
+      confirmed_at: { type: timestamp }
+      confirmed_by: { type: user_ref }
+  timers:
+    type: object
+    fields:
+      complete_docs_at: { type: timestamp }
+      assessment_started_at: { type: timestamp }
+      assessment_reset_at: { type: timestamp }
+  archived_at: { type: timestamp }
+
+# Named loop counters. Every cycle in the state graph must increment one of them.
+counters:
+  info_requests:
+    max: 3
+    message: Maximum information requests exceeded — escalate to team lead
+
+rules:
+  own_claim:
+    type: compare
+    left: $actor.member_id
+    op: eq
+    right: $claim.member_id
+    code: NOT_CLAIM_OWNER
+    message: Members can only act on their own claims
+  staff_or_own_claim:
+    type: any_of
+    code: NOT_CLAIM_OWNER
+    message: Members can only act on their own claims
+    conditions:
+      - { type: compare, left: $actor.role, op: neq, right: member }
+      - { ref: own_claim }
+  assigned_assessor:
+    type: compare
+    left: $actor.user_id
+    op: eq
+    right: $claim.assessor_id
+    code: NOT_ASSIGNED_ASSESSOR
+    message: Only the assigned assessor ({claim.assessor_id}) can act on this claim
+  not_decision_maker:
+    type: not_performed
+    actions: [submit_assessment, approve, cosign_approval]
+    code: SOD_VIOLATION
+    message: "Segregation of duties: {user} took part in the decision on this claim"
+  assessment_complete:
+    type: field_present
+    path: $claim.assessment.summary
+    code: ASSESSMENT_INCOMPLETE
+    message: The assessment report has not been submitted
+  four_eyes:
+    type: any_of
+    code: FOUR_EYES_REQUIRED
+    message: "{claim.assessment.approved_amount|money} exceeds the single-approver limit of {settings.four_eyes_threshold|money}: a team lead must co-sign this exact amount"
+    conditions:
+      - {
+          type: compare,
+          left: $claim.assessment.approved_amount,
+          op: lte,
+          right: $settings.four_eyes_threshold,
+        }
+      - type: all_of
+        conditions:
+          - {
+              type: compare,
+              left: $claim.cosign.amount,
+              op: eq,
+              right: $claim.assessment.approved_amount,
+            }
+          - { type: compare, left: $claim.cosign.user_id, op: neq, right: $actor.user_id }
+
+templates:
+  claim_received:
+    to: member
+    subject: Claim {claim.claim_no} received
+    body: We received your {claim.claim_type} claim for {claim.claimed_amount|money}. We will review your documents shortly.
+  ready_for_assessment:
+    to: role:assessor
+    subject: Claim {claim.claim_no} ready for assessment
+    body: Documents for claim {claim.claim_no} ({claim.claim_type}, {claim.claimed_amount|money}) have been verified.
+  assessor_assigned:
+    to: user:$claim.assessor_id
+    subject: Claim {claim.claim_no} assigned to you
+    body: You have been assigned claim {claim.claim_no} ({claim.claim_type}, {claim.claimed_amount|money}).
+  info_requested:
+    to: member
+    subject: More information needed for claim {claim.claim_no}
+    body: "To continue assessing claim {claim.claim_no} we need: {input.reason}. Please reply through the member portal."
+  claim_approved:
+    to: member
+    subject: Claim {claim.claim_no} approved
+    body: Your claim {claim.claim_no} was approved for {claim.assessment.approved_amount|money}. Payment will follow.
+  claim_rejected:
+    to: member
+    subject: "Claim {claim.claim_no}: decision"
+    body: "Your claim {claim.claim_no} was not approved. Reason ({claim.rejection.reason_code}): {claim.rejection.reason}. You may appeal until {claim.rejection.appeal_deadline|date} by replying to this message or calling our hotline."
+  payment_completed:
+    to: member
+    subject: Claim {claim.claim_no} paid
+    body: "Payment of {claim.payment_request.amount|money} for claim {claim.claim_no} is complete. Payment reference: {claim.payment.confirmation_ref}."
+
+states:
+  SUBMITTED: { label: Submitted, description: "Claim received, awaiting document verification" }
+  DOCUMENTS_VERIFIED:
+    { label: Documents verified, description: "All required documents confirmed present and valid" }
+  UNDER_ASSESSMENT: { label: Under assessment, description: "Assessor is reviewing the claim" }
+  PENDING_INFO:
+    { label: Pending information, description: "Additional information requested from the member" }
+  APPROVED: { label: Approved, description: "Claim approved for payment" }
+  REJECTED: { label: Rejected, description: "Claim denied" }
+  PAYMENT_INITIATED: { label: Payment initiated, description: "Payment processing started" }
+  CLOSED: { label: Closed, description: "Claim lifecycle complete", terminal: true }
+
+transitions:
+  # ── Claim creation (no `from`) ────────────────────────────────────────────────────────────────
+  - id: submit_claim
+    label: Submit claim
+    to: SUBMITTED
+    roles: [member, document_clerk]
+    inputs:
+      policy_id: { type: policy_ref, required: true, label: Policy }
+      claim_type: { type: enum, enum: claim_type, required: true, label: Claim type }
+      claimed_amount: { type: money, required: true, min: 1, label: Claimed amount (VND) }
+      treatment_date: { type: date, required: true, label: Treatment date }
+    authorization:
+      - type: any_of
+        code: NOT_POLICY_HOLDER
+        message: Members can only file claims on their own policy
+        conditions:
+          - { type: compare, left: $actor.role, op: neq, right: member }
+          - { type: compare, left: $actor.member_id, op: eq, right: $policy.member_id }
+    preconditions:
+      - type: all_of
+        code: POLICY_NOT_ACTIVE
+        message: "Policy {policy.id} was not active on {input.treatment_date} (cover {policy.effective_from} to {policy.effective_to})"
+        conditions:
+          - { type: compare, left: $input.treatment_date, op: gte, right: $policy.effective_from }
+          - { type: compare, left: $input.treatment_date, op: lte, right: $policy.effective_to }
+      - type: not
+        code: FILING_DEADLINE_PASSED
+        message: Claims must be filed within {settings.filing_deadline} of treatment ({input.treatment_date})
+        condition:
+          {
+            type: duration_elapsed,
+            since: $input.treatment_date,
+            duration: $settings.filing_deadline,
+          }
+    effects:
+      - { type: set, path: claim.treatment_date, value: $input.treatment_date }
+      - { type: notify, template: claim_received }
+
+  # ── In-state actions (no `to`: the state does not change) ─────────────────────────────────────
+  - id: attach_document
+    label: Attach document
+    from: [SUBMITTED, PENDING_INFO]
+    roles: [member, document_clerk]
+    inputs:
+      document_type: { type: enum, enum: document_type, required: true, label: Document type }
+      file_name: { type: string, max_length: 255, label: File name }
+    authorization: [{ ref: staff_or_own_claim }]
+    effects:
+      - type: append
+        path: claim.documents
+        value:
+          {
+            type: $input.document_type,
+            file_name: $input.file_name,
+            received_at: $now,
+            received_by: $actor.user_id,
+          }
+
+  - id: provide_info
+    label: Provide information
+    from: PENDING_INFO
+    roles: [member, document_clerk]
+    inputs:
+      text: { type: text, required: true, max_length: 2000, label: Information }
+    authorization: [{ ref: staff_or_own_claim }]
+    effects:
+      - type: append
+        path: claim.info_responses
+        value: { text: $input.text, received_at: $now, received_by: $actor.user_id }
+
+  - id: assign_assessor
+    label: Assign assessor
+    from: [DOCUMENTS_VERIFIED, UNDER_ASSESSMENT]
+    roles: [team_lead]
+    inputs:
+      assessor_id: { type: user_ref, role: assessor, required: true, label: Assessor }
+    preconditions:
+      - type: not_performed
+        user: $input.assessor_id
+        actions: [verify_documents, info_received]
+        code: SOD_VIOLATION
+        message: "Segregation of duties: {user} verified this claim's documents and cannot assess it"
+    effects:
+      - { type: set, path: claim.assessor_id, value: $input.assessor_id }
+      - { type: set, path: claim.assigned_at, value: $now }
+      - { type: clear, path: claim.cosign }
+      - { type: notify, template: assessor_assigned }
+
+  - id: submit_assessment
+    label: Submit assessment report
+    from: UNDER_ASSESSMENT
+    roles: [assessor]
+    inputs:
+      summary: { type: text, required: true, max_length: 4000, label: Assessment summary }
+      approved_amount: { type: money, min: 0, label: Approved amount (VND) }
+    authorization: [{ ref: assigned_assessor }]
+    effects:
+      - type: set
+        path: claim.assessment
+        value:
+          {
+            summary: $input.summary,
+            approved_amount: $input.approved_amount,
+            submitted_by: $actor.user_id,
+            submitted_at: $now,
+          }
+      # A co-sign is for one exact amount; a new report invalidates it.
+      - { type: clear, path: claim.cosign }
+
+  - id: cosign_approval
+    label: Co-sign approval
+    from: UNDER_ASSESSMENT
+    roles: [team_lead]
+    authorization:
+      - type: compare
+        left: $actor.user_id
+        op: neq
+        right: $claim.assessor_id
+        code: SOD_VIOLATION
+        message: The assessor cannot co-sign their own assessment
+    preconditions:
+      - type: field_present
+        path: $claim.assessment.approved_amount
+        code: APPROVED_AMOUNT_MISSING
+        message: The assessment has no approved amount to co-sign
+    effects:
+      - type: set
+        path: claim.cosign
+        value:
+          { user_id: $actor.user_id, amount: $claim.assessment.approved_amount, signed_at: $now }
+
+  - id: confirm_payment
+    label: Confirm payment
+    from: PAYMENT_INITIATED
+    roles: [finance]
+    inputs:
+      payment_reference:
+        { type: string, required: true, max_length: 64, label: Bank payment reference }
+    authorization: [{ ref: not_decision_maker }]
+    effects:
+      - type: set
+        path: claim.payment
+        value:
+          {
+            confirmation_ref: $input.payment_reference,
+            confirmed_at: $now,
+            confirmed_by: $actor.user_id,
+          }
+
+  - id: acknowledge_rejection
+    label: Acknowledge rejection
+    from: REJECTED
+    roles: [member]
+    authorization: [{ ref: own_claim }]
+    effects:
+      - { type: set, path: claim.rejection.acknowledged_at, value: $now }
+
+  # ── State changes (the transition table in requirement.md) ────────────────────────────────────
+  - id: verify_documents
+    label: Verify documents
+    from: SUBMITTED
+    to: DOCUMENTS_VERIFIED
+    roles: [document_clerk]
+    preconditions:
+      - { type: documents_present, code: DOCUMENTS_MISSING }
+    effects:
+      - { type: set, path: claim.timers.complete_docs_at, value: $now }
+      - { type: notify, template: ready_for_assessment }
+
+  - id: start_assessment
+    label: Start assessment
+    from: DOCUMENTS_VERIFIED
+    to: UNDER_ASSESSMENT
+    roles: [team_lead]
+    preconditions:
+      - type: field_present
+        path: $claim.assessor_id
+        code: ASSESSOR_NOT_ASSIGNED
+        message: Assign an assessor before starting the assessment
+    effects:
+      - { type: set, path: claim.timers.assessment_started_at, value: $now }
+      - {
+          type: log,
+          message: "Assessment of {claim.claim_no} started at {now|datetime}; assessor {claim.assessor_id}",
+        }
+
+  - id: approve
+    label: Approve
+    from: UNDER_ASSESSMENT
+    to: APPROVED
+    roles: [assessor]
+    authorization: [{ ref: assigned_assessor }]
+    preconditions:
+      - { ref: assessment_complete }
+      - type: field_present
+        path: $claim.assessment.approved_amount
+        code: APPROVED_AMOUNT_MISSING
+        message: The assessment report has no approved amount
+      - type: compare
+        left: $claim.assessment.approved_amount
+        op: lte
+        right: $policy.coverage_limit
+        code: AMOUNT_EXCEEDS_POLICY_LIMIT
+        message: Approved amount {claim.assessment.approved_amount|money} exceeds the policy limit of {policy.coverage_limit|money}
+      - { ref: four_eyes }
+    effects:
+      - type: set
+        path: claim.payment_request
+        value: { id: $uuid, amount: $claim.assessment.approved_amount, created_at: $now }
+      - { type: notify, template: claim_approved }
+
+  - id: reject
+    label: Reject
+    from: UNDER_ASSESSMENT
+    to: REJECTED
+    roles: [assessor]
+    inputs:
+      reason_code:
+        { type: enum, enum: rejection_reason, required: true, label: Rejection reason code }
+      reason:
+        {
+          type: text,
+          required: true,
+          max_length: 2000,
+          label: Rejection reason (sent to the member),
+        }
+    authorization: [{ ref: assigned_assessor }]
+    preconditions:
+      - { ref: assessment_complete }
+    effects:
+      - type: set
+        path: claim.rejection
+        value:
+          reason_code: $input.reason_code
+          reason: $input.reason
+          rejected_at: $now
+          appeal_deadline: { fn: add, args: [$now, $settings.appeal_period] }
+      - { type: notify, template: claim_rejected }
+
+  - id: request_info
+    label: Request more information
+    from: UNDER_ASSESSMENT
+    to: PENDING_INFO
+    roles: [assessor]
+    inputs:
+      reason:
+        {
+          type: text,
+          required: true,
+          max_length: 2000,
+          label: Missing information (sent to the member),
+        }
+    authorization: [{ ref: assigned_assessor }]
+    increments: [info_requests]
+    effects:
+      - type: append
+        path: claim.info_requests
+        value: { description: $input.reason, requested_by: $actor.user_id, requested_at: $now }
+      - { type: notify, template: info_requested }
+
+  - id: info_received
+    label: Information received
+    from: PENDING_INFO
+    to: DOCUMENTS_VERIFIED
+    roles: [document_clerk]
+    preconditions:
+      - type: received_since_state_entry
+        paths: [$claim.documents, $claim.info_responses]
+        code: NO_NEW_INFORMATION
+        message: Nothing new has been received since the information request ({since|datetime})
+    effects:
+      # "Reset assessment timer": the next start_assessment sets a fresh start time.
+      - { type: clear, path: claim.timers.assessment_started_at }
+      - { type: set, path: claim.timers.assessment_reset_at, value: $now }
+      - { type: set, path: claim.timers.complete_docs_at, value: $now }
+
+  - id: initiate_payment
+    label: Initiate payment
+    from: APPROVED
+    to: PAYMENT_INITIATED
+    roles: [finance]
+    authorization: [{ ref: not_decision_maker }]
+    preconditions:
+      - type: field_present
+        path: $claim.payment_request.id
+        code: PAYMENT_REQUEST_MISSING
+        message: No payment request exists for this claim
+    effects:
+      - {
+          type: trigger_payment,
+          amount: $claim.payment_request.amount,
+          reference: $claim.payment_request.id,
+        }
+
+  - id: close_paid
+    label: Close (paid)
+    from: PAYMENT_INITIATED
+    to: CLOSED
+    roles: [finance]
+    authorization: [{ ref: not_decision_maker }]
+    preconditions:
+      - type: field_present
+        path: $claim.payment.confirmation_ref
+        code: PAYMENT_NOT_CONFIRMED
+        message: Payment has not been confirmed yet
+    effects:
+      - { type: notify, template: payment_completed }
+
+  - id: close_rejected
+    label: Close (rejected)
+    from: REJECTED
+    to: CLOSED
+    roles: [system]
+    automatic: true
+    preconditions:
+      - type: any_of
+        code: APPEAL_WINDOW_OPEN
+        message: The appeal window is open until {claim.rejection.appeal_deadline|datetime} and the member has not acknowledged the rejection
+        conditions:
+          - { type: compare, left: $now, op: gte, right: $claim.rejection.appeal_deadline }
+          - { type: field_present, path: $claim.rejection.acknowledged_at }
+    effects:
+      - { type: set, path: claim.archived_at, value: $now }
+      - { type: log, message: "Claim {claim.claim_no} archived" }
