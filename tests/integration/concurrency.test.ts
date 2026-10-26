@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { ActRequest } from '../../src/app/claim-service';
-import { MINUTE } from '../../src/app/clock';
 import { WorkflowError } from '../../src/engine/errors';
+import type { ActRequest } from '../../src/services/claim-service';
+import { MINUTE } from '../../src/services/clock';
 import { createTestDb, Driver, hasDatabase, type TestDb } from '../helpers/pg-schema';
 
 async function refusal(promise: Promise<unknown>): Promise<WorkflowError> {
@@ -43,8 +43,8 @@ describe.skipIf(!hasDatabase)('concurrency and idempotency', () => {
     await d.assess(claimNo, 2_000_000);
     db.clock.advance(MINUTE);
     const results = await Promise.allSettled([
-      d.service.act({ claim: claimNo, transition_id: 'approve', user_id: 'u_assessor_01' }),
-      d.service.act({
+      d.services.claims.act({ claim: claimNo, transition_id: 'approve', user_id: 'u_assessor_01' }),
+      d.services.claims.act({
         claim: claimNo,
         transition_id: 'reject',
         user_id: 'u_assessor_01',
@@ -55,18 +55,18 @@ describe.skipIf(!hasDatabase)('concurrency and idempotency', () => {
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const lost = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     expect(lost.reason).toMatchObject({ code: 'INVALID_TRANSITION' });
-    const { entries } = await d.service.audit(claimNo);
+    const { entries } = await d.services.queries.audit(claimNo);
     expect(
       entries.filter((e) => e.transition_id === 'approve' || e.transition_id === 'reject'),
     ).toHaveLength(1);
-    expect((await d.service.verify(claimNo)).ok).toBe(true);
+    expect((await d.services.queries.verify(claimNo)).ok).toBe(true);
   });
 
   it('a stale expected_version is refused with both versions', async () => {
     const claimNo = await d.submit();
     await d.ok(claimNo, 'attach_document', 'u_member_01', { document_type: 'claim_form' });
     const error = await refusal(
-      d.service.act({
+      d.services.claims.act({
         claim: claimNo,
         transition_id: 'attach_document',
         user_id: 'u_member_01',
@@ -82,8 +82,8 @@ describe.skipIf(!hasDatabase)('concurrency and idempotency', () => {
     const before = await d.count('claims');
     db.clock.advance(MINUTE);
     const [a, b] = await Promise.all([
-      d.service.act(submitRequest('submit-key-0001')),
-      d.service.act(submitRequest('submit-key-0001')),
+      d.services.claims.act(submitRequest('submit-key-0001')),
+      d.services.claims.act(submitRequest('submit-key-0001')),
     ]);
 
     expect(a.entry.entry_id).toBe(b.entry.entry_id);
@@ -101,11 +101,11 @@ describe.skipIf(!hasDatabase)('concurrency and idempotency', () => {
       user_id: 'u_clerk_01',
       idempotency_key: 'verify-key-0001',
     };
-    const first = await d.service.act(request);
+    const first = await d.services.claims.act(request);
     const entries = await d.count('audit_log', 'claim_id = $1', [first.claim.id]);
     const messages = await d.count('outbox', 'claim_id = $1', [first.claim.id]);
     db.clock.advance(MINUTE);
-    const again = await d.service.act(request);
+    const again = await d.services.claims.act(request);
 
     expect(again.replayed).toBe(true);
     expect(again.entry.entry_id).toBe(first.entry.entry_id);
@@ -115,22 +115,22 @@ describe.skipIf(!hasDatabase)('concurrency and idempotency', () => {
   });
 
   it('a key reused for a different request or by another user is refused', async () => {
-    await d.service.act(submitRequest('submit-key-0002'));
+    await d.services.claims.act(submitRequest('submit-key-0002'));
     const different = await refusal(
-      d.service.act({
+      d.services.claims.act({
         ...submitRequest('submit-key-0002'),
         input: { ...submitRequest('x').input, claimed_amount: 9 },
       }),
     );
     expect(different.code).toBe('IDEMPOTENCY_KEY_REUSED');
     const otherUser = await refusal(
-      d.service.act({ ...submitRequest('submit-key-0002'), user_id: 'u_clerk_01' }),
+      d.services.claims.act({ ...submitRequest('submit-key-0002'), user_id: 'u_clerk_01' }),
     );
     expect(otherUser.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 
   it('malformed idempotency keys are refused before touching the database', async () => {
-    const error = await refusal(d.service.act(submitRequest('short')));
+    const error = await refusal(d.services.claims.act(submitRequest('short')));
     expect(error.code).toBe('INVALID_INPUT');
   });
 });

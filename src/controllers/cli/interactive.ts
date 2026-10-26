@@ -1,11 +1,11 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import type { AppContext } from '../app/bootstrap';
-import type { ClaimSnapshot, User } from '../domain/types';
-import type { AvailableTransition } from '../engine/engine';
-import { WorkflowError } from '../engine/errors';
-import type { CompiledTransition } from '../engine/load';
-import type { InputDef } from '../engine/schema';
+import type { ClaimSnapshot, User } from '../../domain/types';
+import type { AvailableTransition } from '../../engine/engine';
+import { WorkflowError } from '../../engine/errors';
+import type { Services } from '../../services/index';
+import type { InputChoice } from '../../services/operations-service';
+import type { InputField } from '../../services/workflow-service';
 import {
   out,
   renderAudit,
@@ -15,8 +15,6 @@ import {
   renderResult,
   renderVerify,
 } from './render';
-
-type InputField = { name: string } & InputDef & { values?: readonly string[] };
 
 class Cancelled extends Error {}
 
@@ -36,27 +34,20 @@ function inputHint(def: InputField): string | undefined {
 /** Prompts for one input based on its declared type; returns undefined when an optional one is skipped. */
 async function promptInput(
   def: InputField,
-  users: User[],
-  policies: string[],
+  choices: InputChoice[] | undefined,
 ): Promise<string | undefined> {
   const label = `${def.label ?? def.name}${def.required ? '' : pc.dim(' (optional)')}`;
   const skip = { value: '', label: pc.dim('(skip)') };
-  const choose = async (options: Array<{ value: string; label?: string; hint?: string }>) => {
+  if (choices) {
+    const options = choices.map(({ value, user }) => ({
+      value,
+      ...(user ? { hint: `${user.display_name} · ${user.roles.join(', ')}` } : {}),
+    }));
     const value = check(
       await p.select({ message: label, options: def.required ? options : [...options, skip] }),
     );
     return value === '' ? undefined : value;
-  };
-  if (def.type === 'enum') return choose((def.values ?? []).map((v) => ({ value: v })));
-  if (def.type === 'user_ref') {
-    const eligible = users.filter(
-      (u) => !u.service_account && (!def.role || u.roles.includes(def.role)),
-    );
-    return choose(
-      eligible.map((u) => ({ value: u.id, hint: `${u.display_name} · ${u.roles.join(', ')}` })),
-    );
   }
-  if (def.type === 'policy_ref') return choose(policies.map((id) => ({ value: id })));
   if (def.type === 'boolean') return String(check(await p.confirm({ message: label })));
   const placeholder = inputHint(def);
   const value = check(
@@ -80,24 +71,15 @@ async function promptInput(
 
 async function promptInputs(
   fields: InputField[],
-  app: AppContext,
+  services: Services,
 ): Promise<Record<string, string>> {
-  const users = await app.service.users();
-  const policies = (await app.ops.policies()).map((pol) => pol.id);
+  const choices = await services.operations.inputChoices(fields);
   const input: Record<string, string> = {};
   for (const field of fields) {
-    const value = await promptInput(field, users, policies);
+    const value = await promptInput(field, choices[field.name]);
     if (value !== undefined) input[field.name] = value;
   }
   return input;
-}
-
-function creationFields(t: CompiledTransition, app: AppContext): InputField[] {
-  return Object.entries(t.inputs).map(([name, def]) => ({
-    name,
-    ...def,
-    ...(def.type === 'enum' ? { values: app.workflow.enums[def.enum ?? ''] ?? [] } : {}),
-  }));
 }
 
 /** Runs an action and prints the outcome; refusals are shown, not thrown. */
@@ -121,14 +103,14 @@ function transitionOption(t: AvailableTransition & { acting_role: string }) {
   };
 }
 
-async function claimMenu(app: AppContext, user: User, claimId: string) {
+async function claimMenu(services: Services, user: User, claimId: string) {
   for (;;) {
-    const { claim, roles, transitions } = await app.service.available(claimId, user.id);
-    const wf = await app.service.workflowFor(app.pool, claim);
+    const { claim, workflow, policy, available } = await services.queries.inspect(claimId, user.id);
+    if (!available) return;
     out();
-    renderClaim(claim, wf, await app.ops.policy(claim.policy_id));
-    renderAvailable(user.id, roles, transitions);
-    const manual = transitions.filter((t) => !t.automatic);
+    renderClaim(claim, workflow, policy);
+    renderAvailable(user.id, available.roles, available.transitions);
+    const manual = available.transitions.filter((t) => !t.automatic);
     const choice = check(
       await p.select({
         message: 'What next?',
@@ -142,17 +124,17 @@ async function claimMenu(app: AppContext, user: User, claimId: string) {
     );
     if (choice === ':back') return;
     if (choice === ':audit') {
-      renderAudit((await app.service.audit(claim.id)).entries);
+      renderAudit(await services.queries.auditEntries(claim.id));
       continue;
     }
     if (choice === ':verify') {
-      renderVerify(await app.service.verify(claim.id));
+      renderVerify(await services.queries.verify(claim.id));
       continue;
     }
     const t = manual.find((x) => x.id === choice);
     if (!t) continue;
     await attempt(async () => {
-      const input = await promptInputs(t.inputs, app);
+      const input = await promptInputs(t.inputs, services);
       if (
         !check(
           await p.confirm({
@@ -162,7 +144,7 @@ async function claimMenu(app: AppContext, user: User, claimId: string) {
       ) {
         return;
       }
-      const result = await app.service.act({
+      const result = await services.claims.act({
         claim: claim.id,
         transition_id: t.id,
         user_id: user.id,
@@ -175,26 +157,20 @@ async function claimMenu(app: AppContext, user: User, claimId: string) {
   }
 }
 
-async function submitClaim(app: AppContext, user: User) {
-  const t = app.workflow.creation;
-  const role = t.roles.find((r) => user.roles.includes(r));
+async function submitClaim(services: Services, user: User) {
+  const form = services.workflows.creationForm(user);
+  const role = form.acting_role;
   if (!role) return;
   await attempt(async () => {
-    const input = await promptInputs(creationFields(t, app), app);
-    const result = await app.service.act({
-      claim: null,
-      transition_id: t.id,
-      user_id: user.id,
-      role,
-      input,
-    });
+    const input = await promptInputs(form.inputs, services);
+    const result = await services.claims.create({ user_id: user.id, role, input });
     renderResult(result);
-    await claimMenu(app, user, result.claim.id);
+    await claimMenu(services, user, result.claim.id);
   });
 }
 
-async function pickClaim(app: AppContext, user: User): Promise<string | undefined> {
-  const claims: ClaimSnapshot[] = await app.service.listClaims({ limit: 30 });
+async function pickClaim(services: Services, user: User): Promise<string | undefined> {
+  const claims: ClaimSnapshot[] = await services.queries.listClaims({ limit: 30 });
   if (claims.length === 0) {
     p.log.info('No claims yet.');
     return undefined;
@@ -216,12 +192,13 @@ async function pickClaim(app: AppContext, user: User): Promise<string | undefine
   return id || undefined;
 }
 
-export async function runInteractive(app: AppContext): Promise<void> {
-  p.intro(pc.bold(`Claims workflow · ${app.workflow.id} v${app.workflow.version}`));
+export async function runInteractive(services: Services): Promise<void> {
+  const wf = services.workflows.current;
+  p.intro(pc.bold(`Claims workflow · ${wf.id} v${wf.version}`));
   p.log.info('Side effects are queued; run `npm run worker` in another terminal to deliver them.');
   try {
     for (;;) {
-      const users = (await app.service.users()).filter((u) => !u.service_account);
+      const users = await services.operations.people();
       const userId = check(
         await p.select({
           message: 'Act as',
@@ -237,24 +214,22 @@ export async function runInteractive(app: AppContext): Promise<void> {
       const user = users.find((u) => u.id === userId);
       if (!user) break;
       for (;;) {
-        const canSubmit = app.workflow.creation.roles.some((r) => user.roles.includes(r));
+        const form = services.workflows.creationForm(user);
         const action = check(
           await p.select({
             message: `${user.id}: what would you like to do?`,
             options: [
               { value: 'open', label: 'Open a claim' },
-              ...(canSubmit
-                ? [{ value: 'new', label: `New claim (${app.workflow.creation.id})` }]
-                : []),
+              ...(form.acting_role ? [{ value: 'new', label: `New claim (${form.id})` }] : []),
               { value: 'switch', label: 'Switch user' },
             ],
           }),
         );
         if (action === 'switch') break;
-        if (action === 'new') await submitClaim(app, user);
+        if (action === 'new') await submitClaim(services, user);
         if (action === 'open') {
-          const claimId = await pickClaim(app, user);
-          if (claimId) await claimMenu(app, user, claimId);
+          const claimId = await pickClaim(services, user);
+          if (claimId) await claimMenu(services, user, claimId);
         }
       }
     }

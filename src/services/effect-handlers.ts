@@ -1,11 +1,10 @@
-import type pg from 'pg';
-import type { OutboxMessage } from '../../domain/types';
-import { sha256Hex } from '../../engine/hash';
-import { formatMoney, maskValue } from '../../engine/templates';
-import { consumeFault, recordNotification, recordPayment } from '../repos/mock';
+import type { OutboxMessage } from '../domain/types';
+import { sha256Hex } from '../engine/hash';
+import { formatMoney, maskValue } from '../engine/templates';
+import type { MockGatewayRepository } from '../repositories/mock-gateway-repository';
 
 export interface HandlerContext {
-  db: pg.Pool;
+  gateway: MockGatewayRepository;
   now: Date;
   log: (line: string) => void;
 }
@@ -25,9 +24,9 @@ export function describeRecipient(to: unknown): string {
 
 // Console output never includes notification bodies: they can carry medical details, which are
 // sensitive personal data. The full text is kept in mock_notifications (the "sent mail" box).
-const notify: Handler = async (m, { db, now, log }) => {
+const notify: Handler = async (m, { gateway, now, log }) => {
   const p = m.payload;
-  const inserted = await recordNotification(db, {
+  const inserted = await gateway.recordNotification({
     idempotency_key: m.idempotency_key,
     claim_id: m.claim_id,
     template: String(p.template),
@@ -43,13 +42,13 @@ const notify: Handler = async (m, { db, now, log }) => {
   return { delivered: true, duplicate: !inserted };
 };
 
-const triggerPayment: Handler = async (m, { db, now, log }) => {
+const triggerPayment: Handler = async (m, { gateway, now, log }) => {
   const p = m.payload;
-  if (await consumeFault(db)) {
+  if (await gateway.consumeFault()) {
     throw new Error('mock payment gateway unavailable (injected fault)');
   }
   const gatewayRef = `MOCKPAY-${sha256Hex(m.idempotency_key).slice(0, 10).toUpperCase()}`;
-  const payment = await recordPayment(db, {
+  const payment = await gateway.recordPayment({
     idempotency_key: m.idempotency_key,
     claim_id: m.claim_id,
     amount: Number(p.amount),

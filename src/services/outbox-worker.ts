@@ -1,13 +1,14 @@
 import { hostname } from 'node:os';
-import type pg from 'pg';
-import { type Clock, ManualClock, systemClock } from '../../app/clock';
-import { leaseBatch, markDone, markFailed, reapExpiredLeases } from '../repos/outbox';
-import { OUTBOX_CHANNEL } from './channel';
-import { HANDLERS, type Handler } from './handlers';
+import type { MockGatewayRepository } from '../repositories/mock-gateway-repository';
+import type { OutboxNotifications, OutboxRepository } from '../repositories/outbox-repository';
+import { type Clock, ManualClock, systemClock } from './clock';
+import { HANDLERS, type Handler } from './effect-handlers';
 
 export interface WorkerOptions {
-  pool: pg.Pool;
-  schema: string;
+  outbox: OutboxRepository;
+  notifications: OutboxNotifications;
+  /** What the handlers deliver to. */
+  gateway: MockGatewayRepository;
   clock?: Clock;
   workerId?: string;
   leaseMs?: number;
@@ -47,11 +48,10 @@ export class OutboxWorker {
   }
 
   async processOnce(): Promise<RoundResult> {
-    const { pool } = this.options;
+    const { outbox, gateway } = this.options;
     const now = this.clock.now();
-    const reaped = await reapExpiredLeases(pool, now);
-    const batch = await leaseBatch(
-      pool,
+    const reaped = await outbox.reapExpiredLeases(now);
+    const batch = await outbox.lease(
       this.workerId,
       now,
       this.options.leaseMs ?? 30_000,
@@ -62,13 +62,13 @@ export class OutboxWorker {
       const handler = this.handlers[message.effect_type];
       try {
         if (!handler) throw new Error(`no handler for effect type ${message.effect_type}`);
-        const output = await handler(message, { db: pool, now: this.clock.now(), log: this.log });
-        await markDone(pool, message.id, this.workerId, this.clock.now(), output);
+        const output = await handler(message, { gateway, now: this.clock.now(), log: this.log });
+        await outbox.markDone(message.id, this.workerId, this.clock.now(), output);
         result.done++;
       } catch (error) {
         const reason = (error as Error).message;
         const retryAt = new Date(this.clock.now().getTime() + backoffMs(message.attempts));
-        const status = await markFailed(pool, message.id, this.workerId, retryAt, reason);
+        const status = await outbox.markFailed(message.id, this.workerId, retryAt, reason);
         if (status === 'DEAD') {
           result.dead++;
           this.log(
@@ -99,7 +99,7 @@ export class OutboxWorker {
       total.dead += r.dead;
       if (r.leased > 0) continue;
       if (!(this.clock instanceof ManualClock)) break;
-      const next = await this.nextDueAt();
+      const next = await this.options.outbox.nextDueAt();
       if (!next) break;
       // A due message may just be leased by another worker; never move the clock backwards.
       if (next.getTime() > this.clock.now().getTime()) this.clock.set(next);
@@ -107,38 +107,27 @@ export class OutboxWorker {
     return total;
   }
 
-  private async nextDueAt(): Promise<Date | null> {
-    const { rows } = await this.options.pool.query<{ next: Date | null }>(
-      `SELECT min(next_attempt_at) AS next FROM outbox
-        WHERE status IN ('PENDING', 'FAILED') AND attempts < max_attempts`,
-    );
-    return rows[0]?.next ?? null;
-  }
-
   /** Long-running loop: wakes on NOTIFY from committed transactions and polls as a fallback. */
   async run(signal: AbortSignal): Promise<void> {
-    const listener = await this.options.pool.connect();
     let wake: (() => void) | undefined;
     // Set when a notification arrives while a batch is being processed, so it is not missed.
     let pending = false;
-    const onNotify = (n: pg.Notification) => {
-      if (n.channel !== OUTBOX_CHANNEL || n.payload !== this.options.schema) return;
-      pending = true;
-      wake?.();
-    };
+    const subscription = await this.options.notifications.listen({
+      onNotify: () => {
+        pending = true;
+        wake?.();
+      },
+      // If the LISTEN connection drops, notifications stop but polling keeps the worker going.
+      onError: (error) =>
+        this.log(
+          `[worker] notification connection lost (${error.message}); polling every ${this.options.pollMs ?? 2000} ms`,
+        ),
+    });
     const onAbort = () => wake?.();
-    // If the LISTEN connection drops, notifications stop but polling keeps the worker going.
-    const onError = (error: Error) =>
-      this.log(
-        `[worker] notification connection lost (${error.message}); polling every ${this.options.pollMs ?? 2000} ms`,
-      );
-    listener.on('notification', onNotify);
-    listener.on('error', onError);
     signal.addEventListener('abort', onAbort, { once: true });
     try {
-      await listener.query(`LISTEN ${OUTBOX_CHANNEL}`);
       this.log(
-        `[worker] ${this.workerId} listening on ${OUTBOX_CHANNEL} (schema ${this.options.schema})`,
+        `[worker] ${this.workerId} listening on ${subscription.channel} (schema ${subscription.schema})`,
       );
       while (!signal.aborted) {
         pending = false;
@@ -163,14 +152,7 @@ export class OutboxWorker {
       }
     } finally {
       signal.removeEventListener('abort', onAbort);
-      listener.off('notification', onNotify);
-      const unlistened = await listener.query(`UNLISTEN ${OUTBOX_CHANNEL}`).then(
-        () => true,
-        () => false,
-      );
-      listener.off('error', onError);
-      // A connection that could not UNLISTEN is broken: destroy it instead of returning it.
-      listener.release(!unlistened);
+      await subscription.close();
     }
   }
 }

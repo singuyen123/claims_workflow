@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildServer } from '../../src/api/routes';
+import { buildServer } from '../../src/controllers/http/routes';
 import { createTestDb, hasDatabase, type TestDb } from '../helpers/pg-schema';
 
 const as = (user: string, role?: string) => ({
@@ -23,7 +23,7 @@ describe.skipIf(!hasDatabase)('HTTP API', () => {
 
   beforeAll(async () => {
     db = await createTestDb('api');
-    server = await buildServer(db.app);
+    server = await buildServer(db.app.services);
   });
   afterAll(async () => {
     await server?.close();

@@ -1,6 +1,6 @@
 // Demo scenarios. Unlike the engine, this file is allowed to name states, transitions and users
 // of config/workflow.yaml: it is a script that drives that particular workflow.
-import { DAY } from '../app/clock';
+import { DAY } from '../services/clock';
 import type { ScenarioRun } from './harness';
 
 export interface Scenario {
@@ -35,7 +35,7 @@ export const SCENARIOS: Scenario[] = [
         'PAYMENT_INITIATED',
         'CLOSED',
       ]);
-      const payments = await s.app.ops.payments((await s.claim(c)).id);
+      const payments = await s.services.operations.payments((await s.claim(c)).id);
       s.check(
         'exactly one payment reached the gateway',
         payments.length === 1,
@@ -351,25 +351,25 @@ export const SCENARIOS: Scenario[] = [
       await s.toAssessment(c);
       await s.assess(c, 1_500_000);
       await s.act(c, 'approve', 'u_assessor_01');
-      await s.app.ops.failNextPayments(2);
+      await s.services.operations.failNextPayments(2);
       s.note('Fault injection: the next 2 calls to the mock payment gateway fail.');
       await s.act(c, 'initiate_payment', 'u_finance_01', {}, { key: `pay-${c}` });
       await s.act(c, 'initiate_payment', 'u_finance_01', {}, { key: `pay-${c}` });
       const id = (await s.claim(c)).id;
-      const payments = await s.app.ops.payments(id);
+      const payments = await s.services.operations.payments(id);
       s.check(
         'exactly one payment despite two failures and a repeated request',
         payments.length === 1,
         `${payments.length}`,
       );
-      const message = (await s.app.ops.outbox({ claimId: id })).find(
+      const message = (await s.services.operations.outbox({ claim: id })).find(
         (m) => m.effect_type === 'trigger_payment',
       );
       s.check(
         'the payment message succeeded on its third attempt',
         message?.attempts === 3 && message.status === 'DONE',
       );
-      const { entries } = await s.service.audit(c);
+      const { entries } = await s.services.queries.audit(c);
       s.check(
         'the repeated request added no audit entry',
         entries.filter((e) => e.transition_id === 'initiate_payment').length === 1,
@@ -386,9 +386,9 @@ export const SCENARIOS: Scenario[] = [
     title: 'Audit integrity of every claim',
     goal: 'For every claim created above: the hash chain is intact, replaying the recorded changes reproduces each snapshot, and the claim row equals the last audited snapshot. Refused attempts were kept out of the chain.',
     async run(s) {
-      const claims = await s.service.listClaims({ limit: 1000 });
+      const claims = await s.services.queries.listClaims({ limit: 1000 });
       for (const claim of [...claims].reverse()) await s.verify(claim.claim_no);
-      const denied = await s.service.denied();
+      const denied = await s.services.queries.denied();
       s.check(
         'refused attempts were recorded separately',
         denied.length > 0,
@@ -449,7 +449,10 @@ export const SCENARIOS: Scenario[] = [
         'CLOSED',
       ]);
       const claim = await s.claim(c);
-      s.check('the new claim is pinned to v2', claim.config_hash === s.service.workflow.hash);
+      s.check(
+        'the new claim is pinned to v2',
+        claim.config_hash === s.services.workflows.current.hash,
+      );
       await s.verify(c);
     },
   },

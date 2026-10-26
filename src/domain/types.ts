@@ -97,6 +97,47 @@ export interface DeniedAttempt {
   occurred_at: string;
 }
 
+/** Filter for listing claims. */
+export interface ClaimFilter {
+  states?: string[];
+  assessorId?: string;
+  memberId?: string;
+  limit?: number;
+}
+
+/** A workflow definition as registered in `workflow_definitions`. */
+export interface StoredDefinition {
+  config_hash: string;
+  workflow_id: string;
+  version: number;
+  content: unknown;
+  registered_at: string;
+}
+
+export type DefinitionSummary = Omit<StoredDefinition, 'content'>;
+
+/** A payment received by the mock payment gateway. */
+export interface MockPayment {
+  idempotency_key: string;
+  claim_id: string;
+  amount: number;
+  reference: string;
+  gateway_ref: string;
+  created_at: string;
+}
+
+/** A notification "sent" through the mock notification channel. */
+export interface MockNotification {
+  idempotency_key: string;
+  claim_id: string;
+  template: string;
+  channel: string;
+  recipient: Record<string, unknown>;
+  subject: string | null;
+  body: string;
+  sent_at: string;
+}
+
 export type OutboxStatus = 'PENDING' | 'PROCESSING' | 'DONE' | 'FAILED' | 'DEAD';
 
 export interface OutboxMessage {

@@ -18,7 +18,19 @@ interprets that file; it contains no claim-specific logic.
 
 ## Architecture rules
 
-- Dependencies point one way: `cli` / `api` → `app` → `engine`. `infra` implements ports used by `app`.
+- Three layers, dependencies pointing one way: `controllers` → `services` → `repositories`
+  (interfaces) ← `repositories/postgres` (implementations); services also use `engine`.
+  `src/bootstrap.ts` is the only place that wires implementations into services.
+  `tests/unit/architecture.test.ts` enforces the import rules.
+  - **Controllers** (`src/controllers/http`, `src/controllers/cli`): parse and validate input
+    (zod, headers, CLI args), call exactly one service method, then return, render or map the
+    result to an HTTP status or exit code. No business rules, no `AppContext`/pool, no imports
+    from `repositories/`, `infra/db` or `pg`.
+  - **Services** (`src/services`): all logic. Data access only through repository interfaces;
+    transactions through `UnitOfWork.transaction`. Never import `pg`, `infra/db` or
+    `repositories/postgres`.
+  - **Repositories**: interfaces in `src/repositories/*.ts`, PostgreSQL implementations in
+    `src/repositories/postgres/`, the only place with SQL besides migrations.
 - `src/engine` is pure: no I/O, no `Date.now()`, no randomness. Time and ids are injected.
 - Never add workflow-specific behaviour (state names, transition ids, roles) to TypeScript.
   If a new behaviour is needed, add a generic condition/effect primitive and use it from config.

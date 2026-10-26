@@ -6,14 +6,15 @@ import {
   migrateSchema,
   resetSchema,
   seedSchema,
-} from '../app/bootstrap';
-import type { ActRequest } from '../app/claim-service';
-import { type Clock, ManualClock } from '../app/clock';
-import type { OutboxStatus } from '../domain/types';
-import { WorkflowError } from '../engine/errors';
-import { ConfigError, loadWorkflowFile } from '../engine/load';
-import { toMermaid } from '../engine/mermaid';
-import { env } from '../infra/env';
+} from '../../bootstrap';
+import type { OutboxStatus } from '../../domain/types';
+import { WorkflowError } from '../../engine/errors';
+import { ConfigError } from '../../engine/load';
+import { env } from '../../infra/env';
+import type { ActRequest, CreateRequest } from '../../services/claim-service';
+import { type Clock, ManualClock } from '../../services/clock';
+import type { Services } from '../../services/index';
+import { validateWorkflowFile, workflowFileDiagram } from '../../services/workflow-service';
 import { runInteractive } from './interactive';
 import {
   out,
@@ -62,9 +63,15 @@ function parseInputs(pairs: string[]): Record<string, string> {
   return input;
 }
 
+/** What a command gets: the services, and the outbox worker for the commands that run it. */
+interface CommandContext {
+  services: Services;
+  createWorker: AppContext['createWorker'];
+}
+
 async function withApp(
   cmd: Command,
-  fn: (app: AppContext, g: GlobalOptions) => Promise<void>,
+  fn: (ctx: CommandContext, g: GlobalOptions) => Promise<void>,
   clock?: Clock,
 ) {
   const g = cmd.optsWithGlobals<GlobalOptions>();
@@ -74,7 +81,7 @@ async function withApp(
     ...(clock ? { clock } : {}),
   });
   try {
-    await fn(app, g);
+    await fn({ services: app.services, createWorker: (o) => app.createWorker(o) }, g);
   } finally {
     await app.close();
   }
@@ -100,24 +107,21 @@ interface ActOptions {
   idempotencyKey?: string;
 }
 
-function actRequest(
-  claim: string | null,
-  transition: string,
-  o: ActOptions,
-  extra = {},
-): ActRequest {
+function actionRequest(o: ActOptions, extra = {}): CreateRequest {
   const input: Record<string, unknown> = { ...extra, ...parseInputs(o.input) };
   if (o.reason !== undefined) input.reason = o.reason;
   if (o.notes !== undefined) input.notes = o.notes;
   return {
-    claim,
-    transition_id: transition,
     user_id: o.as,
     input,
     ...(o.role ? { role: o.role } : {}),
     ...(o.expectedVersion !== undefined ? { expected_version: o.expectedVersion } : {}),
     ...(o.idempotencyKey ? { idempotency_key: o.idempotencyKey } : {}),
   };
+}
+
+function actRequest(claim: string | null, transition: string, o: ActOptions): ActRequest {
+  return { ...actionRequest(o), claim, transition_id: transition };
 }
 
 const actorOptions = (cmd: Command) =>
@@ -145,8 +149,10 @@ actorOptions(
     'repeating a request with the same key returns the first result',
   )
   .action(async (claim: string, transition: string, o: ActOptions, cmd: Command) => {
-    await withApp(cmd, async ({ service }, g) => {
-      const result = await service.act(actRequest(claim === '-' ? null : claim, transition, o));
+    await withApp(cmd, async ({ services }, g) => {
+      const result = await services.claims.act(
+        actRequest(claim === '-' ? null : claim, transition, o),
+      );
       if (g.json) printJson(result);
       else renderResult(result);
     });
@@ -171,13 +177,10 @@ actorOptions(
   )
   .action(
     async (o: ActOptions & { policy: string; type: string; amount: string }, cmd: Command) => {
-      await withApp(cmd, async ({ service }, g) => {
-        const request = actRequest(null, service.workflow.creation.id, o, {
-          policy_id: o.policy,
-          claim_type: o.type,
-          claimed_amount: o.amount,
-        });
-        const result = await service.act(request);
+      await withApp(cmd, async ({ services }, g) => {
+        const result = await services.claims.create(
+          actionRequest(o, { policy_id: o.policy, claim_type: o.type, claimed_amount: o.amount }),
+        );
         if (g.json) printJson(result);
         else renderResult(result);
       });
@@ -191,10 +194,13 @@ program
   .option('--as <user>', 'evaluate the available transitions for this user')
   .option('--role <role>', 'only this role of the user')
   .action(async (ref: string, o: { as?: string; role?: string }, cmd: Command) => {
-    await withApp(cmd, async ({ service, ops }, g) => {
-      const claim = await service.requireClaim(ref);
-      const wf = await service.workflowFor(service.pool, claim);
-      const available = o.as ? await service.available(claim.id, o.as, o.role) : undefined;
+    await withApp(cmd, async ({ services }, g) => {
+      const {
+        claim,
+        workflow: wf,
+        policy,
+        available,
+      } = await services.queries.inspect(ref, o.as, o.role);
       if (g.json) {
         printJson({
           claim,
@@ -203,7 +209,7 @@ program
         });
         return;
       }
-      renderClaim(claim, wf, await ops.policy(claim.policy_id));
+      renderClaim(claim, wf, policy);
       out();
       if (available) renderAvailable(o.as as string, available.roles, available.transitions);
       else renderStateTransitions(claim, wf);
@@ -232,28 +238,16 @@ program
       cmd: Command,
     ) => {
       if (o.queue && !o.as) throw new UsageError('--queue needs --as <user>');
-      await withApp(cmd, async ({ service }, g) => {
-        let claims = await service.listClaims({
+      await withApp(cmd, async ({ services }, g) => {
+        const claims = await services.queries.listClaims({
           limit: o.limit,
           ...(o.state ? { states: o.state } : {}),
           ...(o.assessor ? { assessorId: o.assessor } : {}),
           ...(o.member ? { memberId: o.member } : {}),
+          ...(o.queue && o.as ? { queue_for: { user_id: o.as } } : {}),
         });
-        let next: Map<string, string> | undefined;
-        if (o.queue && o.as) {
-          next = new Map();
-          for (const claim of claims) {
-            const { transitions } = await service.available(claim.id, o.as);
-            const ready = transitions.filter((t) => t.allowed && !t.automatic).map((t) => t.id);
-            if (ready.length) next.set(claim.id, ready.join(', '));
-          }
-          claims = claims.filter((c) => next?.has(c.id));
-        }
-        if (g.json)
-          printJson(
-            next ? claims.map((c) => ({ ...c, can_run: next?.get(c.id)?.split(', ') })) : claims,
-          );
-        else renderClaimList(claims, next);
+        if (g.json) printJson(claims);
+        else renderClaimList(claims, Boolean(o.queue));
       });
     },
   );
@@ -264,11 +258,10 @@ program
   .argument('<claim>', 'claim number or id')
   .option('--state-changes-only', 'hide in-state actions')
   .action(async (ref: string, o: { stateChangesOnly?: boolean }, cmd: Command) => {
-    await withApp(cmd, async ({ service }, g) => {
-      const { entries } = await service.audit(ref);
-      const shown = o.stateChangesOnly
-        ? entries.filter((e) => e.from_state !== e.to_state)
-        : entries;
+    await withApp(cmd, async ({ services }, g) => {
+      const shown = await services.queries.auditEntries(ref, {
+        stateChangesOnly: Boolean(o.stateChangesOnly),
+      });
       if (g.json) printJson(shown);
       else renderAudit(shown);
     });
@@ -279,8 +272,8 @@ program
   .description('Refused attempts (kept apart from the audit chain, one row per minute per kind)')
   .argument('[claim]', 'claim number or id (default: all claims)')
   .action(async (ref: string | undefined, _o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ service }, g) => {
-      const list = await service.denied(ref);
+    await withApp(cmd, async ({ services }, g) => {
+      const list = await services.queries.denied(ref);
       if (g.json) printJson(list);
       else renderDenied(list);
     });
@@ -293,8 +286,8 @@ program
   .option('--all', 'verify every claim')
   .action(async (ref: string | undefined, o: { all?: boolean }, cmd: Command) => {
     if (!ref && !o.all) throw new UsageError('give a claim or --all');
-    await withApp(cmd, async ({ service }, g) => {
-      const reports = ref ? [await service.verify(ref)] : await service.verifyAll();
+    await withApp(cmd, async ({ services }, g) => {
+      const reports = await services.queries.verifyClaims(ref);
       if (g.json) printJson(ref ? reports[0] : reports);
       else if (reports.length === 0) out(pc.dim('No claims to verify.'));
       else for (const r of reports) renderVerify(r);
@@ -306,8 +299,8 @@ program
   .command('users')
   .description('Users and the roles they hold')
   .action(async (_o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ service }, g) => {
-      const users = await service.users();
+    await withApp(cmd, async ({ services }, g) => {
+      const users = await services.operations.users();
       if (g.json) printJson(users);
       else renderUsers(users);
     });
@@ -317,8 +310,8 @@ program
   .command('policies')
   .description('Policies and their coverage limits')
   .action(async (_o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ ops }, g) => {
-      const policies = await ops.policies();
+    await withApp(cmd, async ({ services }, g) => {
+      const policies = await services.operations.policies();
       if (g.json) printJson(policies);
       else renderPolicies(policies);
     });
@@ -337,19 +330,9 @@ config
   .action(async (file: string | undefined, _o: unknown, cmd: Command) => {
     const g = cmd.optsWithGlobals<GlobalOptions>();
     const source = file ?? g.config ?? env.workflowConfig();
-    const wf = loadWorkflowFile(source);
-    if (g.json) {
-      printJson({
-        ok: true,
-        source,
-        workflow: wf.id,
-        version: wf.version,
-        config_hash: wf.hash,
-        warnings: wf.warnings,
-      });
-    } else {
-      renderConfigSummary(wf, source);
-    }
+    const { workflow, summary } = validateWorkflowFile(source);
+    if (g.json) printJson(summary);
+    else renderConfigSummary(workflow, source);
   });
 
 config
@@ -361,21 +344,11 @@ config
   .action(async (file: string | undefined, o: { claim?: string; roles: boolean }, cmd: Command) => {
     const g = cmd.optsWithGlobals<GlobalOptions>();
     if (!o.claim) {
-      out(
-        toMermaid(loadWorkflowFile(file ?? g.config ?? env.workflowConfig()), { roles: o.roles }),
-      );
+      out(workflowFileDiagram(file ?? g.config ?? env.workflowConfig(), { roles: o.roles }));
       return;
     }
-    await withApp(cmd, async ({ service }) => {
-      const { claim, entries } = await service.audit(o.claim as string);
-      const wf = await service.workflowFor(service.pool, claim);
-      out(
-        toMermaid(wf, {
-          current: claim.state,
-          visited: entries.map((e) => e.to_state),
-          roles: o.roles,
-        }),
-      );
+    await withApp(cmd, async ({ services }) => {
+      out(await services.queries.diagram(o.claim as string, { roles: o.roles }));
     });
   });
 
@@ -383,10 +356,10 @@ config
   .command('list')
   .description('Workflow definitions registered in the database (claims are pinned to one of them)')
   .action(async (_o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ ops, workflow }, g) => {
-      const defs = await ops.definitions();
-      if (g.json) printJson(defs.map((d) => ({ ...d, current: d.config_hash === workflow.hash })));
-      else renderDefinitions(defs, workflow.hash);
+    await withApp(cmd, async ({ services }, g) => {
+      const defs = await services.workflows.definitions();
+      if (g.json) printJson(defs);
+      else renderDefinitions(defs);
     });
   });
 
@@ -446,11 +419,10 @@ outbox
   .option('--status <status>', 'PENDING, PROCESSING, DONE, FAILED or DEAD')
   .option('--claim <claim>', 'only this claim')
   .action(async (o: { status?: string; claim?: string }, cmd: Command) => {
-    await withApp(cmd, async ({ service, ops }, g) => {
-      const claimId = o.claim ? (await service.requireClaim(o.claim)).id : undefined;
-      const list = await ops.outbox({
+    await withApp(cmd, async ({ services }, g) => {
+      const list = await services.operations.outbox({
         ...(o.status ? { status: o.status.toUpperCase() as OutboxStatus } : {}),
-        ...(claimId ? { claimId } : {}),
+        ...(o.claim ? { claim: o.claim } : {}),
       });
       if (g.json) printJson(list);
       else renderOutbox(list);
@@ -462,8 +434,8 @@ outbox
   .description('Deliver due messages now, in this process')
   .option('--once', 'a single batch instead of everything that is due')
   .action(async (o: { once?: boolean }, cmd: Command) => {
-    await withApp(cmd, async (app, g) => {
-      const worker = app.createWorker({ log: out });
+    await withApp(cmd, async ({ createWorker }, g) => {
+      const worker = createWorker({ log: out });
       const result = o.once ? await worker.processOnce() : await worker.drain();
       if (g.json) printJson(result);
       else
@@ -480,8 +452,9 @@ outbox
   .description('Give a DEAD message a fresh set of attempts')
   .argument('<id>', 'outbox message id', wholeNumber)
   .action(async (id: number, _o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ ops }) => {
-      if (!(await ops.retryOutbox(id))) throw new UsageError(`outbox #${id} is not DEAD`);
+    await withApp(cmd, async ({ services }) => {
+      if (!(await services.operations.retryOutbox(id)))
+        throw new UsageError(`outbox #${id} is not DEAD`);
       out(`${pc.green('✓')} outbox #${id} queued again`);
     });
   });
@@ -491,8 +464,8 @@ program
   .description('Long-running outbox worker (LISTEN/NOTIFY with polling fallback); Ctrl+C to stop')
   .option('--poll-ms <ms>', 'polling interval when no notification arrives', wholeNumber, 2000)
   .action(async (o: { pollMs: number }, cmd: Command) => {
-    await withApp(cmd, async (app) => {
-      const worker = app.createWorker({ log: out, pollMs: o.pollMs });
+    await withApp(cmd, async ({ createWorker }) => {
+      const worker = createWorker({ log: out, pollMs: o.pollMs });
       const stop = new AbortController();
       process.once('SIGINT', () => stop.abort());
       process.once('SIGTERM', () => stop.abort());
@@ -520,8 +493,8 @@ system
     }
     await withApp(
       cmd,
-      async ({ service }, g) => {
-        const results = await service.runSystem(o.claim);
+      async ({ services }, g) => {
+        const results = await services.claims.runSystem(o.claim);
         if (g.json) printJson(results);
         else if (results.length === 0)
           out(pc.dim('Nothing to do: no automatic transition is due.'));
@@ -539,8 +512,8 @@ gateway
   .description('Make the next N payment calls fail (to watch retries and idempotency)')
   .argument('<n>', 'number of failures', wholeNumber)
   .action(async (n: number, _o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ ops }) => {
-      await ops.failNextPayments(n);
+    await withApp(cmd, async ({ services }) => {
+      await services.operations.failNextPayments(n);
       out(`${pc.green('✓')} the next ${n} payment call(s) will fail`);
     });
   });
@@ -550,9 +523,8 @@ gateway
   .description('Payments received by the mock gateway')
   .option('--claim <claim>', 'only this claim')
   .action(async (o: { claim?: string }, cmd: Command) => {
-    await withApp(cmd, async ({ service, ops }, g) => {
-      const claimId = o.claim ? (await service.requireClaim(o.claim)).id : undefined;
-      const list = await ops.payments(claimId);
+    await withApp(cmd, async ({ services }, g) => {
+      const list = await services.operations.payments(o.claim);
       if (g.json) printJson(list);
       else renderPayments(list);
     });
@@ -564,9 +536,8 @@ mock
   .option('--claim <claim>', 'only this claim')
   .option('--full', 'include message bodies (may contain medical details)')
   .action(async (o: { claim?: string; full?: boolean }, cmd: Command) => {
-    await withApp(cmd, async ({ service, ops }, g) => {
-      const claimId = o.claim ? (await service.requireClaim(o.claim)).id : undefined;
-      const list = await ops.notifications(claimId);
+    await withApp(cmd, async ({ services }, g) => {
+      const list = await services.operations.notifications(o.claim);
       if (g.json) printJson(list);
       else renderNotifications(list, o.full);
     });
@@ -579,7 +550,7 @@ program
     'Guided mode: pick a user, a claim and an action; inputs are prompted from the config',
   )
   .action(async (_o: unknown, cmd: Command) => {
-    await withApp(cmd, (app) => runInteractive(app));
+    await withApp(cmd, ({ services }) => runInteractive(services));
   });
 
 // ── errors ───────────────────────────────────────────────────────────────────────────────────

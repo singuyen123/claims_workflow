@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import type pg from 'pg';
-import { type AppContext, createApp, migrateSchema, seedSchema } from '../../src/app/bootstrap';
-import type { ActRequest, ActResult } from '../../src/app/claim-service';
-import { ManualClock, MINUTE } from '../../src/app/clock';
+import { type AppContext, createApp, migrateSchema, seedSchema } from '../../src/bootstrap';
 import { WorkflowError } from '../../src/engine/errors';
 import { type CompiledWorkflow, loadWorkflowFile } from '../../src/engine/load';
 import { createPool } from '../../src/infra/db/pool';
 import { loadEnv } from '../../src/infra/env';
+import type { ActRequest, ActResult } from '../../src/services/claim-service';
+import { ManualClock, MINUTE } from '../../src/services/clock';
 
 loadEnv();
 
@@ -82,13 +82,13 @@ export class Driver {
     readonly app: AppContext = db.app,
   ) {}
 
-  get service() {
-    return this.app.service;
+  get services() {
+    return this.app.services;
   }
 
   async act(req: ActRequest): Promise<ActResult> {
     this.db.clock.advance(MINUTE);
-    return this.service.act(req);
+    return this.services.claims.act(req);
   }
 
   ok(claim: string | null, transition: string, user: string, input: Input = {}, role?: string) {
@@ -120,7 +120,7 @@ export class Driver {
   async submit(options: { amount?: number; type?: string; policy?: string; user?: string } = {}) {
     const result = await this.ok(
       null,
-      this.service.workflow.creation.id,
+      this.services.workflows.current.creation.id,
       options.user ?? 'u_member_01',
       {
         policy_id: options.policy ?? 'POL-001',
@@ -133,8 +133,8 @@ export class Driver {
   }
 
   async attachRequired(claimNo: string, user = 'u_member_01') {
-    const claim = await this.service.requireClaim(claimNo);
-    const wf = await this.service.workflowFor(this.app.pool, claim);
+    const claim = await this.services.queries.requireClaim(claimNo);
+    const wf = await this.services.workflows.workflowFor(claim);
     for (const doc of wf.definition.document_requirements[claim.claim_type] ?? []) {
       await this.ok(claimNo, 'attach_document', user, {
         document_type: doc,
@@ -168,7 +168,7 @@ export class Driver {
   }
 
   async states(claimNo: string): Promise<string[]> {
-    const { entries } = await this.service.audit(claimNo);
+    const { entries } = await this.services.queries.audit(claimNo);
     const states = [entries[0]?.to_state as string];
     for (const e of entries.slice(1)) if (e.from_state !== e.to_state) states.push(e.to_state);
     return states;

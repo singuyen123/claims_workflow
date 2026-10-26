@@ -1,25 +1,24 @@
 import Table from 'cli-table3';
 import pc from 'picocolors';
-import type { ActResult } from '../app/claim-service';
-import {
-  type DefinitionSummary,
-  describeRecipient,
-  type MockNotification,
-  type MockPayment,
-} from '../app/operations';
-import type { VerifyReport } from '../app/verify';
 import type {
   AuditEntry,
   ClaimSnapshot,
+  DefinitionSummary,
   DeniedAttempt,
+  MockNotification,
+  MockPayment,
   OutboxMessage,
   Policy,
   User,
-} from '../domain/types';
-import type { AvailableTransition } from '../engine/engine';
-import { WorkflowError } from '../engine/errors';
-import { type CompiledWorkflow, ConfigError } from '../engine/load';
-import { formatDateTime, formatMoney } from '../engine/templates';
+} from '../../domain/types';
+import type { AvailableTransition } from '../../engine/engine';
+import { WorkflowError } from '../../engine/errors';
+import { type CompiledWorkflow, ConfigError } from '../../engine/load';
+import { formatDateTime, formatMoney } from '../../engine/templates';
+import type { ClaimListItem } from '../../services/claim-query-service';
+import type { ActResult } from '../../services/claim-service';
+import { describeRecipient } from '../../services/effect-handlers';
+import type { VerifyReport } from '../../services/verify';
 
 export const out = (line = '') => process.stdout.write(`${line}\n`);
 
@@ -109,14 +108,14 @@ export function renderStateTransitions(claim: ClaimSnapshot, wf: CompiledWorkflo
   out(pc.dim('Add --as <user> to see which of these that user can run now and why.'));
 }
 
-/** `next` maps claim id → what the viewing user can do next (work-queue view). */
-export function renderClaimList(claims: ClaimSnapshot[], next?: Map<string, string>) {
+/** `queue`: work-queue view, with what the viewing user can do next (`can_run`). */
+export function renderClaimList(claims: ClaimListItem[], queue = false) {
   if (claims.length === 0) {
     out(pc.dim('No claims found.'));
     return;
   }
   const head = ['Claim', 'State', 'Type', 'Amount', 'Member', 'Assessor', 'Updated (ICT)'];
-  if (next) head.push('You can');
+  if (queue) head.push('You can');
   const t = table(head);
   for (const c of claims) {
     const row = [
@@ -128,7 +127,7 @@ export function renderClaimList(claims: ClaimSnapshot[], next?: Map<string, stri
       String(c.data.assessor_id ?? '—'),
       when(c.updated_at),
     ];
-    if (next) row.push(next.get(c.id) ?? '');
+    if (queue) row.push(c.can_run?.join(', ') ?? '');
     t.push(row);
   }
   out(t.toString());
@@ -157,10 +156,10 @@ export function renderPolicies(policies: Policy[]) {
   out(t.toString());
 }
 
-export function renderDefinitions(defs: DefinitionSummary[], currentHash: string) {
+export function renderDefinitions(defs: Array<DefinitionSummary & { current: boolean }>) {
   const t = table(['Workflow', 'Version', 'Config hash', 'Registered (ICT)', '']);
   for (const d of defs) {
-    const current = d.config_hash === currentHash ? pc.green('current') : '';
+    const current = d.current ? pc.green('current') : '';
     t.push([d.workflow_id, String(d.version), d.config_hash, when(d.registered_at), current]);
   }
   out(t.toString());

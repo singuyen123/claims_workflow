@@ -1,4 +1,4 @@
-import { WorkflowError } from '../engine/errors';
+import { WorkflowError } from '../../engine/errors';
 
 /** RFC 9457 problem details; `code` and the workflow error details are extension members. */
 export interface Problem {

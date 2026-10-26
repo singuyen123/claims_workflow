@@ -8,12 +8,14 @@ How the claims workflow orchestrator is built and why. For a quick start see the
 
 ```mermaid
 flowchart LR
-  cli[CLI<br/>src/cli] --> app
-  api[HTTP API<br/>src/api] --> app
+  cli[CLI controller<br/>src/controllers/cli] --> services
+  api[HTTP controller<br/>src/controllers/http] --> services
   web[Web UI<br/>web/] -. HTTP .-> api
-  scenarios[Scenario runner<br/>src/scenarios] --> app
-  app[Application<br/>ClaimService, registry, verify] --> engine[Engine<br/>pure functions]
-  app --> infra[Infrastructure<br/>PostgreSQL repos, outbox worker, mocks]
+  scenarios[Scenario runner<br/>src/scenarios] --> services
+  services[Services<br/>ClaimService, ClaimQueryService,<br/>WorkflowService, OperationsService,<br/>outbox worker] --> engine[Engine<br/>pure functions]
+  services --> repos[Repository interfaces<br/>src/repositories]
+  pg[PostgreSQL repositories<br/>src/repositories/postgres] -. implements .-> repos
+  boot[Composition root<br/>src/bootstrap.ts] -. wires .-> pg
   config[(config/workflow.yaml)] --> engine
 ```
 
@@ -21,16 +23,21 @@ flowchart LR
   is pure: no I/O, no clock, no randomness. Time and id generation are passed in. It knows nothing
   about claims beyond a small contract (a claim has a policy, a member, a type, an amount, a state,
   counters and participants).
-- **Application** (`src/app`): `ClaimService` runs one transition per database transaction,
-  `DefinitionRegistry` stores and pins workflow versions, `verify` checks the audit trail,
-  `Operations` exposes the outbox and mocks.
-- **Infrastructure** (`src/infra`): SQL migrations and repositories, the outbox worker and its
-  handlers, the mock payment gateway and notification channel.
-- **Interfaces**: the CLI, the HTTP API and the web UI share the application layer; the scenario
-  runner drives it in-process.
+- **Controllers** (`src/controllers`): the CLI commands, interactive mode and the HTTP routes.
+  Each one parses its input, calls one service method and renders or returns the result; the web
+  UI talks to the HTTP controller.
+- **Services** (`src/services`): all the logic. `ClaimService` runs one transition per database
+  transaction; `ClaimQueryService` answers lists, work queues, "what can I do now", the audit
+  trail and `verify`; `WorkflowService` stores and pins workflow versions; `OperationsService`
+  exposes reference data, the outbox and the mocks; the outbox worker and its handlers deliver
+  side effects.
+- **Repositories** (`src/repositories`): the interfaces services use for every query, plus a
+  `UnitOfWork` for transactions. The PostgreSQL implementations (`src/repositories/postgres`) hold
+  all the SQL apart from the migrations in `src/infra/db`.
 
-Dependencies point one way (interfaces → application → engine), so the engine's unit tests run
-without a database.
+Dependencies point one way (controllers → services → repository interfaces), and only
+`src/bootstrap.ts` knows the PostgreSQL implementations, so the engine's unit tests run without a
+database and `tests/unit/architecture.test.ts` keeps the layers apart.
 
 ## The workflow file
 
@@ -140,6 +147,8 @@ sequenceDiagram
   `SELECT … FOR UPDATE` plays the role SQLite's `BEGIN IMMEDIATE` would: concurrent actions on one
   claim run one after the other, and the loser re-evaluates against the new state (usually an
   `INVALID_TRANSITION`).
+- Replays, automatic transitions and the refusal record run after the transaction has released
+  its connection, so a burst of concurrent actions cannot exhaust the connection pool.
 - The idempotency record is written in the same transaction as the change, so a retried request
   either sees it or performs the change, never both. A key reused with a different request or by
   another user is refused.

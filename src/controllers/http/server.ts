@@ -1,7 +1,7 @@
 // HTTP API for the web UI. Usage: npm run api [-- --port 3000] [-- --no-worker]
 // Runs the outbox worker in the same process unless --no-worker is given (then run `npm run worker`).
 import pc from 'picocolors';
-import { createApp } from '../app/bootstrap';
+import { createApp } from '../../bootstrap';
 import { buildServer } from './routes';
 
 function option(name: string): string | undefined {
@@ -15,7 +15,7 @@ async function main() {
   const app = await createApp({
     ...(option('--config') ? { configPath: option('--config') } : {}),
   });
-  const server = await buildServer(app, { log: (line) => console.log(pc.dim(line)) });
+  const server = await buildServer(app.services, { log: (line) => console.log(pc.dim(line)) });
 
   const stop = new AbortController();
   const worker = process.argv.includes('--no-worker')

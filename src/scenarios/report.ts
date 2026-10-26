@@ -1,6 +1,6 @@
-import type { VerifyReport } from '../app/verify';
 import type { AuditEntry, ClaimSnapshot, DeniedAttempt } from '../domain/types';
 import { formatDateTime } from '../engine/templates';
+import type { VerifyReport } from '../services/verify';
 import type { ScenarioRun, StepRecord } from './harness';
 import type { Scenario } from './scenarios';
 

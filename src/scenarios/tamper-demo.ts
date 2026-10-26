@@ -4,11 +4,11 @@
 // Usage: npm run demo:tamper [-- --keep]
 import type pg from 'pg';
 import pc from 'picocolors';
-import { createApp, dropSchema, migrateSchema, seedSchema } from '../app/bootstrap';
-import { ManualClock } from '../app/clock';
-import type { VerifyReport } from '../app/verify';
+import { createApp, dropSchema, migrateSchema, seedSchema } from '../bootstrap';
 import { createPool } from '../infra/db/pool';
 import { env } from '../infra/env';
+import { ManualClock } from '../services/clock';
+import type { VerifyReport } from '../services/verify';
 import { ScenarioRun } from './harness';
 
 const say = (line = '') => console.log(line);
@@ -81,7 +81,7 @@ async function main() {
         `${claimNo} approved for 2,000,000 VND (${claim.version} audit entries) in schema ${schema}`,
       ),
     );
-    printReport(await app.service.verify(claimNo));
+    printReport(await app.services.queries.verify(claimNo));
 
     say();
     say(pc.bold('1. The database refuses edits made behind the engine'));
@@ -102,7 +102,7 @@ async function main() {
         claim.id,
       ]),
     );
-    printReport(await app.service.verify(claimNo));
+    printReport(await app.services.queries.verify(claimNo));
 
     say();
     say(pc.bold('2. An owner disables the triggers and edits the claim row'));
@@ -112,7 +112,7 @@ async function main() {
       `UPDATE claims SET data = jsonb_set(data, '{assessment,approved_amount}', '90000000') WHERE id = $1`,
       [claim.id],
     );
-    printReport(await app.service.verify(claimNo));
+    printReport(await app.services.queries.verify(claimNo));
 
     say();
     say(pc.bold('3. … and rewrites who approved it in the audit log'));
@@ -122,7 +122,7 @@ async function main() {
       `UPDATE audit_log SET actor_user_id = 'u_lead_01' WHERE claim_id = $1 AND transition_id = 'approve'`,
       [claim.id],
     );
-    printReport(await app.service.verify(claimNo));
+    printReport(await app.services.queries.verify(claimNo));
     say();
     say(
       pc.dim(

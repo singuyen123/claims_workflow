@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { DAY } from '../../src/app/clock';
 import { ConfigError, loadWorkflowFile, loadWorkflowText } from '../../src/engine';
+import { DAY } from '../../src/services/clock';
 import { BASE_CONFIG, EngineHarness } from '../helpers/engine-harness';
 
 const APPEAL_CONFIG = 'config/examples/workflow.appeal.yaml';
