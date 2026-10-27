@@ -7,13 +7,14 @@ import {
   resetSchema,
   seedSchema,
 } from '../../bootstrap';
-import type { OutboxStatus } from '../../domain/types';
+import type { OutboxMessage, OutboxStatus } from '../../domain/types';
 import { WorkflowError } from '../../engine/errors';
 import { ConfigError } from '../../engine/load';
 import { env } from '../../infra/env';
 import type { ActRequest, CreateRequest } from '../../services/claim-service';
 import { type Clock, ManualClock } from '../../services/clock';
 import type { Services } from '../../services/index';
+import { EFFECT_TYPES } from '../../services/retry-policy';
 import { validateWorkflowFile, workflowFileDiagram } from '../../services/workflow-service';
 import { runInteractive } from './interactive';
 import {
@@ -449,15 +450,36 @@ outbox
 
 outbox
   .command('retry')
-  .description('Give a DEAD message a fresh set of attempts')
-  .argument('<id>', 'outbox message id', wholeNumber)
-  .action(async (id: number, _o: unknown, cmd: Command) => {
-    await withApp(cmd, async ({ services }) => {
-      if (!(await services.operations.retryOutbox(id)))
-        throw new UsageError(`outbox #${id} is not DEAD`);
-      out(`${pc.green('✓')} outbox #${id} queued again`);
-    });
-  });
+  .description('Give a DEAD message, or every DEAD message with --all, a fresh set of attempts')
+  .argument('[id]', 'outbox message id', wholeNumber)
+  .option('--all', 'every DEAD message (narrow it with --claim and --type)')
+  .option('--claim <claim>', 'with --all: only this claim')
+  .option('--type <type>', 'with --all: only this effect type (notify, trigger_payment, log)')
+  .action(
+    async (
+      id: number | undefined,
+      o: { all?: boolean; claim?: string; type?: string },
+      cmd: Command,
+    ) => {
+      if ((id === undefined) === !o.all) throw new UsageError('give a message id or --all');
+      if (o.type && !EFFECT_TYPES.includes(o.type as OutboxMessage['effect_type'])) {
+        throw new UsageError(`--type must be one of ${EFFECT_TYPES.join(', ')}`);
+      }
+      await withApp(cmd, async ({ services }) => {
+        if (id === undefined) {
+          const count = await services.operations.retryDeadOutbox({
+            ...(o.claim ? { claim: o.claim } : {}),
+            ...(o.type ? { effect_type: o.type as OutboxMessage['effect_type'] } : {}),
+          });
+          out(`${pc.green('✓')} ${count} DEAD message(s) queued again`);
+          return;
+        }
+        if (!(await services.operations.retryOutbox(id)))
+          throw new UsageError(`outbox #${id} is not DEAD`);
+        out(`${pc.green('✓')} outbox #${id} queued again`);
+      });
+    },
+  );
 
 program
   .command('worker')
@@ -494,11 +516,15 @@ system
     await withApp(
       cmd,
       async ({ services }, g) => {
-        const results = await services.claims.runSystem(o.claim);
-        if (g.json) printJson(results);
-        else if (results.length === 0)
-          out(pc.dim('Nothing to do: no automatic transition is due.'));
-        else for (const r of results) renderResult(r);
+        const run = await services.claims.runSystem(o.claim);
+        if (g.json) printJson(run);
+        else {
+          if (run.results.length === 0 && run.failures.length === 0)
+            out(pc.dim('Nothing to do: no automatic transition is due.'));
+          for (const r of run.results) renderResult(r);
+          for (const f of run.failures) out(pc.red(`${f.claim_no}: not checked: ${f.message}`));
+        }
+        if (run.failures.length) process.exitCode = 1;
       },
       clock,
     );

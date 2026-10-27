@@ -50,7 +50,7 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
   });
 
   it('the runtime role has no UPDATE or DELETE privilege on the audit trail and claims', async () => {
-    const app = db.app.pool;
+    const app = db.appPool;
     await expect(app.query(`UPDATE audit_log SET reason = 'edited'`)).rejects.toMatchObject({
       code: '42501',
     });
@@ -64,8 +64,40 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
     });
   });
 
+  it('the runtime role can only move an outbox message through its delivery states', async () => {
+    await expect(
+      db.appPool.query(`UPDATE outbox SET payload = '{}' WHERE claim_id = $1`, [claimId]),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      db.appPool.query(`UPDATE outbox SET idempotency_key = 'k' WHERE claim_id = $1`, [claimId]),
+    ).rejects.toMatchObject({ code: '42501' });
+    const moved = await db.appPool.query(
+      `UPDATE outbox SET last_error = 'probe' WHERE claim_id = $1`,
+      [claimId],
+    );
+    expect(moved.rowCount).toBeGreaterThan(0);
+  });
+
+  it('nobody can change what an outbox message says, or reopen a delivered one', async () => {
+    await expect(
+      db.owner.query(`UPDATE outbox SET payload = '{}' WHERE claim_id = $1`, [claimId]),
+    ).rejects.toThrow(/cannot change: only its delivery state moves/);
+    await expect(
+      db.owner.query(
+        `UPDATE outbox SET status = 'DONE', processed_at = created_at WHERE claim_id = $1`,
+        [claimId],
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      db.owner.query(
+        `UPDATE outbox SET status = 'PENDING', processed_at = NULL WHERE claim_id = $1`,
+        [claimId],
+      ),
+    ).rejects.toThrow(/was delivered and cannot be reopened/);
+  });
+
   it('a claim cannot change without its audit entry: the deferred check fails the commit', async () => {
-    const client = await db.app.pool.connect();
+    const client = await db.appPool.connect();
     try {
       await client.query('BEGIN');
       await client.query(
@@ -203,6 +235,19 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
     const codes = (await d.services.queries.verify(claim.claim_no)).issues.map((i) => i.code);
     expect(codes).toContain('ENTRY_TAMPERED');
     expect(codes).toContain('REPLAY_MISMATCH');
+  });
+
+  it('an outbox message edited behind the engine no longer matches its audit entry', async () => {
+    const claim = await freshClaim();
+    await tamper(
+      db.owner,
+      'outbox',
+      `UPDATE outbox SET payload = jsonb_set(payload, '{body}', '"edited"')
+        WHERE claim_id = $1 AND effect_type = 'notify'`,
+      [claim.id],
+    );
+    const report = await d.services.queries.verify(claim.claim_no);
+    expect(new Set(report.issues.map((i) => i.code))).toEqual(new Set(['OUTBOX_TAMPERED']));
   });
 
   it('a modified workflow definition is detected (runs last: it taints the shared definition)', async () => {

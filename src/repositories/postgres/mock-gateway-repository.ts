@@ -1,75 +1,98 @@
+import type { EntityManager } from 'typeorm';
 import type { MockNotification, MockPayment } from '../../domain/types';
-import type { Db } from '../../infra/db/pool';
 import type { MockGatewayRepository } from '../mock-gateway-repository';
+import { FaultEntity } from './entities/mock-gateway-fault';
+import { PaymentEntity, type PaymentRow } from './entities/mock-gateway-payment';
+import { NotificationEntity, type NotificationRow } from './entities/mock-notification';
 import { iso } from './rows';
 
+const toPayment = (r: PaymentRow): MockPayment => ({
+  idempotency_key: r.idempotency_key,
+  claim_id: r.claim_id,
+  amount: r.amount,
+  reference: r.reference,
+  gateway_ref: r.gateway_ref,
+  created_at: iso(r.created_at),
+});
+
+const toNotification = (r: NotificationRow): MockNotification => ({
+  idempotency_key: r.idempotency_key,
+  claim_id: r.claim_id,
+  template: r.template,
+  channel: r.channel,
+  recipient: r.recipient as Record<string, unknown>,
+  subject: r.subject,
+  body: r.body,
+  sent_at: iso(r.sent_at),
+});
+
 export class PgMockGatewayRepository implements MockGatewayRepository {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly manager: EntityManager) {}
 
   async consumeFault(): Promise<boolean> {
-    const r = await this.db.query(
-      `UPDATE mock_gateway_faults SET remaining_failures = remaining_failures - 1
-        WHERE id = 1 AND remaining_failures > 0`,
-    );
-    return r.rowCount === 1;
+    const r = await this.manager
+      .getRepository(FaultEntity)
+      .createQueryBuilder()
+      .update()
+      // A decrement relative to the stored value: SQL expression, no ORM equivalent.
+      .set({ remaining_failures: () => 'remaining_failures - 1' })
+      .where('id = 1 AND remaining_failures > 0')
+      .updateEntity(false)
+      .execute();
+    return r.affected === 1;
   }
 
   async setFaults(count: number): Promise<void> {
-    await this.db.query('UPDATE mock_gateway_faults SET remaining_failures = $1 WHERE id = 1', [
-      count,
-    ]);
+    await this.manager
+      .getRepository(FaultEntity)
+      .createQueryBuilder()
+      .update()
+      .set({ remaining_failures: count })
+      .where({ id: 1 })
+      .updateEntity(false)
+      .execute();
   }
 
   async recordPayment(p: MockPayment): Promise<MockPayment & { created: boolean }> {
-    const inserted = await this.db.query(
-      `INSERT INTO mock_gateway_payments (idempotency_key, claim_id, amount, reference, gateway_ref, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (idempotency_key) DO NOTHING`,
-      [p.idempotency_key, p.claim_id, p.amount, p.reference, p.gateway_ref, p.created_at],
-    );
-    const { rows } = await this.db.query(
-      `SELECT idempotency_key, claim_id, amount, reference, gateway_ref, created_at
-         FROM mock_gateway_payments WHERE idempotency_key = $1`,
-      [p.idempotency_key],
-    );
-    const row = rows[0];
-    return { ...row, created_at: iso(row.created_at), created: inserted.rowCount === 1 };
+    const payments = this.manager.getRepository(PaymentEntity);
+    const inserted = await payments
+      .createQueryBuilder()
+      .insert()
+      .values({ ...p })
+      .orIgnore()
+      .returning('idempotency_key')
+      .updateEntity(false)
+      .execute();
+    const row = await payments.findOneByOrFail({ idempotency_key: p.idempotency_key });
+    return { ...toPayment(row), created: (inserted.raw as unknown[]).length === 1 };
   }
 
   async listPayments(claimId?: string): Promise<MockPayment[]> {
-    const { rows } = await this.db.query(
-      `SELECT idempotency_key, claim_id, amount, reference, gateway_ref, created_at
-         FROM mock_gateway_payments ${claimId ? 'WHERE claim_id = $1' : ''} ORDER BY id`,
-      claimId ? [claimId] : [],
-    );
-    return rows.map((r) => ({ ...r, created_at: iso(r.created_at) }));
+    const rows = await this.manager.getRepository(PaymentEntity).find({
+      where: claimId ? { claim_id: claimId } : {},
+      order: { id: 'ASC' },
+    });
+    return rows.map(toPayment);
   }
 
   async recordNotification(n: MockNotification): Promise<boolean> {
-    const r = await this.db.query(
-      `INSERT INTO mock_notifications (idempotency_key, claim_id, template, channel, recipient, subject, body, sent_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (idempotency_key) DO NOTHING`,
-      [
-        n.idempotency_key,
-        n.claim_id,
-        n.template,
-        n.channel,
-        JSON.stringify(n.recipient),
-        n.subject,
-        n.body,
-        n.sent_at,
-      ],
-    );
-    return r.rowCount === 1;
+    const result = await this.manager
+      .getRepository(NotificationEntity)
+      .createQueryBuilder()
+      .insert()
+      .values({ ...n })
+      .orIgnore()
+      .returning('idempotency_key')
+      .updateEntity(false)
+      .execute();
+    return (result.raw as unknown[]).length === 1;
   }
 
   async listNotifications(claimId?: string): Promise<MockNotification[]> {
-    const { rows } = await this.db.query(
-      `SELECT idempotency_key, claim_id, template, channel, recipient, subject, body, sent_at
-         FROM mock_notifications ${claimId ? 'WHERE claim_id = $1' : ''} ORDER BY id`,
-      claimId ? [claimId] : [],
-    );
-    return rows.map((r) => ({ ...r, sent_at: iso(r.sent_at) }));
+    const rows = await this.manager.getRepository(NotificationEntity).find({
+      where: claimId ? { claim_id: claimId } : {},
+      order: { id: 'ASC' },
+    });
+    return rows.map(toNotification);
   }
 }

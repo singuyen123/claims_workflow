@@ -1,51 +1,65 @@
+import type { EntityManager } from 'typeorm';
 import type { DefinitionSummary, StoredDefinition } from '../../domain/types';
 import type { CompiledWorkflow } from '../../engine/load';
-import type { Db } from '../../infra/db/pool';
 import type { DefinitionRepository } from '../definition-repository';
+import { DefinitionEntity, type DefinitionRow } from './entities/workflow-definition';
 import { iso } from './rows';
 
+const toDefinition = (r: DefinitionRow): StoredDefinition => ({
+  config_hash: r.config_hash,
+  workflow_id: r.workflow_id,
+  version: r.version,
+  content: r.content,
+  registered_at: iso(r.registered_at),
+});
+
 export class PgDefinitionRepository implements DefinitionRepository {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly manager: EntityManager) {}
+
+  private get repo() {
+    return this.manager.getRepository(DefinitionEntity);
+  }
 
   async find(hash: string): Promise<StoredDefinition | null> {
-    const { rows } = await this.db.query(
-      'SELECT config_hash, workflow_id, version, content, registered_at FROM workflow_definitions WHERE config_hash = $1',
-      [hash],
-    );
-    return rows[0] ? { ...rows[0], registered_at: iso(rows[0].registered_at) } : null;
+    const row = await this.repo.findOneBy({ config_hash: hash });
+    return row ? toDefinition(row) : null;
   }
 
   async findByVersion(workflowId: string, version: number): Promise<StoredDefinition | null> {
-    const { rows } = await this.db.query(
-      `SELECT config_hash, workflow_id, version, content, registered_at
-         FROM workflow_definitions WHERE workflow_id = $1 AND version = $2`,
-      [workflowId, version],
-    );
-    return rows[0] ? { ...rows[0], registered_at: iso(rows[0].registered_at) } : null;
+    const row = await this.repo.findOneBy({ workflow_id: workflowId, version });
+    return row ? toDefinition(row) : null;
   }
 
   async insert(wf: CompiledWorkflow, now: Date): Promise<boolean> {
-    try {
-      const r = await this.db.query(
-        `INSERT INTO workflow_definitions (config_hash, workflow_id, version, content, registered_at)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (config_hash) DO NOTHING`,
-        [wf.hash, wf.id, wf.version, JSON.stringify(wf.file), now.toISOString()],
-      );
-      return r.rowCount === 1;
-    } catch (error) {
-      // Another process registered this workflow version first (with whatever hash it has).
-      if ((error as { constraint?: string }).constraint === 'workflow_definitions_version_unique')
-        return false;
-      throw error;
-    }
+    // ON CONFLICT DO NOTHING without a target also covers workflow_definitions_version_unique:
+    // when another process registered this version first, nothing is inserted.
+    const result = await this.repo
+      .createQueryBuilder()
+      .insert()
+      .values({
+        config_hash: wf.hash,
+        workflow_id: wf.id,
+        version: wf.version,
+        content: wf.file,
+        registered_at: now.toISOString(),
+      })
+      .orIgnore()
+      .returning('config_hash')
+      .updateEntity(false)
+      .execute();
+    return (result.raw as unknown[]).length === 1;
   }
 
   async list(): Promise<DefinitionSummary[]> {
-    const { rows } = await this.db.query(
-      `SELECT config_hash, workflow_id, version, registered_at FROM workflow_definitions
-        ORDER BY workflow_id, version`,
-    );
-    return rows.map((r) => ({ ...r, registered_at: iso(r.registered_at) }));
+    const rows = await this.repo.find({
+      select: { config_hash: true, workflow_id: true, version: true, registered_at: true },
+      order: { workflow_id: 'ASC', version: 'ASC' },
+    });
+    return rows.map((r) => ({
+      config_hash: r.config_hash,
+      workflow_id: r.workflow_id,
+      version: r.version,
+      registered_at: iso(r.registered_at),
+    }));
   }
 }

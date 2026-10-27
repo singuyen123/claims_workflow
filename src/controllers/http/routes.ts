@@ -1,15 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Services } from '../../services/index';
 import { HttpProblem, toProblem } from './problem';
-import {
-  actionInput,
-  type ClaimParams,
-  type ClaimsQuery,
-  listClaimsInput,
-  optionalActor,
-  type TransitionParams,
-  transitionInput,
-} from './requests';
+import { actionInput, actor, claimRef, listClaimsInput, transitionInput } from './requests';
 
 export interface ServerOptions {
   /** One line per request (method, path, status, duration); never bodies, which hold PII. */
@@ -49,13 +41,12 @@ export async function buildServer(
 
   server.get('/api/workflow', async () => workflows.describe());
 
+  // Demo authentication: the web UI lists the people one can act as before anyone is chosen.
   server.get('/api/users', async () => operations.people());
 
-  server.get('/api/policies', async () => operations.policies());
+  server.get('/api/policies', async (request) => operations.policies(actor(request)));
 
-  server.get<{ Querystring: ClaimsQuery }>('/api/claims', async (request) =>
-    queries.listClaims(listClaimsInput(request)),
-  );
+  server.get('/api/claims', async (request) => queries.listClaims(listClaimsInput(request)));
 
   server.post('/api/claims', async (request, reply) => {
     const result = await claims.create(actionInput(request));
@@ -63,37 +54,36 @@ export async function buildServer(
     return result;
   });
 
-  server.get<{ Params: ClaimParams }>('/api/claims/:ref', async (request) =>
-    queries.detail(request.params.ref, optionalActor(request)),
+  server.get('/api/claims/:ref', async (request) =>
+    queries.detail(claimRef(request), actor(request)),
   );
 
-  server.post<{ Params: TransitionParams }>(
-    '/api/claims/:ref/transitions/:transition',
-    async (request) => claims.act(transitionInput(request)),
+  server.post('/api/claims/:ref/transitions/:transition', async (request) =>
+    claims.act(transitionInput(request)),
   );
 
-  server.get<{ Params: ClaimParams }>('/api/claims/:ref/audit', async (request) =>
-    queries.auditEntries(request.params.ref),
+  server.get('/api/claims/:ref/audit', async (request) =>
+    queries.auditEntries(claimRef(request), {}, actor(request)),
   );
 
-  server.get<{ Params: ClaimParams }>('/api/claims/:ref/denied', async (request) =>
-    queries.denied(request.params.ref),
+  server.get('/api/claims/:ref/denied', async (request) =>
+    queries.denied(claimRef(request), actor(request)),
   );
 
-  server.get<{ Params: ClaimParams }>('/api/claims/:ref/verify', async (request) =>
-    queries.verify(request.params.ref),
+  server.get('/api/claims/:ref/verify', async (request) =>
+    queries.verify(claimRef(request), actor(request)),
   );
 
-  server.get<{ Params: ClaimParams }>('/api/claims/:ref/notifications', async (request) =>
-    operations.notifications(request.params.ref),
+  server.get('/api/claims/:ref/notifications', async (request) =>
+    operations.notifications(claimRef(request), actor(request)),
   );
 
-  server.get<{ Params: ClaimParams }>('/api/claims/:ref/outbox', async (request) =>
-    operations.outbox({ claim: request.params.ref }),
+  server.get('/api/claims/:ref/outbox', async (request) =>
+    operations.outbox({ claim: claimRef(request) }, actor(request)),
   );
 
   /** Fires time-based automatic transitions now (what a scheduler would do periodically). */
-  server.post('/api/system/run', async () => ({ results: await claims.runSystem() }));
+  server.post('/api/system/run', async (request) => claims.runSystem(undefined, actor(request)));
 
   return server;
 }

@@ -82,6 +82,24 @@ describe('layering', () => {
     );
   });
 
+  it('only the PostgreSQL repositories, migrations and the composition root use TypeORM', () => {
+    expect(
+      violations(
+        /^(?!repositories\/postgres\/|infra\/db\/|bootstrap\.ts$)/,
+        (i) => i.specifier === 'typeorm' || i.specifier.startsWith('typeorm/'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('only the HTTP controller validates requests with class models', () => {
+    expect(
+      violations(
+        /^(?!controllers\/http\/)/,
+        (i) => i.specifier === 'class-validator' || i.specifier === 'class-transformer',
+      ),
+    ).toEqual([]);
+  });
+
   it('the engine only depends on itself and the domain types', () => {
     expect(violations(/^engine\//, targets(/^(?!engine\/|domain\/)/))).toEqual([]);
   });

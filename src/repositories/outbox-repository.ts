@@ -6,12 +6,15 @@ export interface OutboxInsert {
   effect_type: OutboxMessage['effect_type'];
   payload: Record<string, unknown>;
   idempotency_key: string;
+  /** Attempts before the message is DEAD. */
+  max_attempts: number;
   created_at: string;
 }
 
 export interface OutboxFilter {
   status?: OutboxStatus;
   claimId?: string;
+  effectType?: OutboxMessage['effect_type'];
 }
 
 /** The transactional outbox of external side effects. */
@@ -45,6 +48,8 @@ export interface OutboxRepository {
   list(filter?: OutboxFilter): Promise<OutboxMessage[]>;
   /** Gives a DEAD message a fresh set of attempts; false if it is not DEAD. */
   retryDead(id: number, now: Date): Promise<boolean>;
+  /** Gives every DEAD message matching `filter` (its status aside) a fresh set of attempts. */
+  retryAllDead(now: Date, filter?: Omit<OutboxFilter, 'status'>): Promise<number>;
 }
 
 export interface OutboxSubscription {

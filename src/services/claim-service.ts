@@ -5,8 +5,11 @@ import { WorkflowError } from '../engine/errors';
 import { hashValue } from '../engine/hash';
 import type { IdempotencyRecord } from '../repositories/idempotency-repository';
 import type { UnitOfWork } from '../repositories/unit-of-work';
+import { ReadAccess, type Viewer } from './access';
 import { buildAuditEntry } from './audit-chain';
+import { eachClaim } from './claim-pages';
 import { type Clock, monotonic, systemClock } from './clock';
+import { RETRY_POLICIES } from './retry-policy';
 import type { WorkflowService } from './workflow-service';
 
 export const SYSTEM_USER = 'svc_system';
@@ -46,6 +49,13 @@ export interface ActResult {
   automatic: ActResult[];
   /** True when the idempotency key matched an earlier identical request. */
   replayed: boolean;
+}
+
+/** Outcome of a scheduler pass. */
+export interface SystemRunResult {
+  results: ActResult[];
+  /** Claims the pass could not check, with the reason; the other claims were still checked. */
+  failures: Array<{ claim_no: string; message: string }>;
 }
 
 interface InternalOptions {
@@ -193,6 +203,7 @@ export class ClaimService {
             effect_type: m.effect_type,
             payload: m.payload,
             idempotency_key: m.idempotency_key,
+            max_attempts: RETRY_POLICIES[m.effect_type].maxAttempts,
             created_at: plan.occurred_at,
           })),
         );
@@ -300,20 +311,29 @@ export class ClaimService {
     return results;
   }
 
-  /** Checks time-based automatic transitions for one claim or every open claim. */
-  async runSystem(claimRef?: string): Promise<ActResult[]> {
+  /**
+   * Checks time-based automatic transitions for one claim or every open claim. A claim that
+   * fails (its definition no longer loads, the database drops a query) is reported in
+   * `failures` and the pass goes on with the next one. A `viewer` (HTTP) must be staff.
+   */
+  async runSystem(claimRef?: string, viewer?: Viewer): Promise<SystemRunResult> {
     const { store, workflows } = this.options;
+    await new ReadAccess(store.repos.users).checkStaff(viewer, 'The scheduler pass');
     if (claimRef) {
       const claim = await store.repos.claims.find(claimRef);
       if (!claim) throw new WorkflowError('CLAIM_NOT_FOUND', `Claim ${claimRef} not found`);
-      return this.autoAdvance(claim.id);
+      return { results: await this.autoAdvance(claim.id), failures: [] };
     }
-    const results: ActResult[] = [];
-    for (const claim of await store.repos.claims.list({ limit: 1000 })) {
-      const wf = await workflows.workflowFor(claim);
-      if (wf.isTerminal(claim.state)) continue;
-      results.push(...(await this.autoAdvance(claim.id)));
+    const run: SystemRunResult = { results: [], failures: [] };
+    for await (const claim of eachClaim(store.repos.claims)) {
+      try {
+        const wf = await workflows.workflowFor(claim);
+        if (wf.isTerminal(claim.state)) continue;
+        run.results.push(...(await this.autoAdvance(claim.id)));
+      } catch (error) {
+        run.failures.push({ claim_no: claim.claim_no, message: (error as Error).message });
+      }
     }
-    return results;
+    return run;
   }
 }

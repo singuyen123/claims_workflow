@@ -214,7 +214,7 @@ export class ScenarioRun {
 
   /** Runs the scheduler pass that fires time-based automatic transitions. */
   async system(claimNo?: string): Promise<ActResult[]> {
-    const results = await this.services.claims.runSystem(claimNo);
+    const { results } = await this.services.claims.runSystem(claimNo);
     const effects = await this.deliver();
     this.steps.push({
       kind: 'system',

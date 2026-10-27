@@ -1,55 +1,75 @@
 // Owner-only maintenance: schema lifecycle and reference data. The runtime role has no privilege
-// for any of this, so these functions take the owner's pool and are not part of `Repositories`.
-// The owner pool has a single connection: never run these queries in parallel.
-import type pg from 'pg';
+// for any of this, so these functions take a data source connected as the schema owner and are
+// not part of `Repositories`.
+import type { DataSource, EntitySchema, ObjectLiteral, QueryDeepPartialEntity } from 'typeorm';
 import type { Policy, User } from '../../domain/types';
 import { SCHEMA_RE } from '../../infra/db/pool';
+import { PolicyEntity } from './entities/policy';
+import { UserEntity } from './entities/user';
 
 function checkSchema(schema: string) {
   if (!SCHEMA_RE.test(schema)) throw new Error(`Invalid schema name '${schema}'`);
 }
 
-export async function createSchema(owner: pg.Pool, schema: string): Promise<void> {
+export async function createSchema(owner: DataSource, schema: string): Promise<void> {
   checkSchema(schema);
-  await owner.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+  const runner = owner.createQueryRunner();
+  try {
+    await runner.createSchema(schema, true);
+  } finally {
+    await runner.release();
+  }
 }
 
 /** Drops the schema with all its data; audit tables are append-only, so this is the only reset. */
-export async function dropSchema(owner: pg.Pool, schema: string): Promise<void> {
+export async function dropSchema(owner: DataSource, schema: string): Promise<void> {
   checkSchema(schema);
-  await owner.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  const runner = owner.createQueryRunner();
+  try {
+    await runner.dropSchema(schema, true, true);
+  } finally {
+    await runner.release();
+  }
 }
 
 /** Inserts or updates users and policies. */
 export async function upsertReference(
-  owner: pg.Pool,
+  owner: DataSource,
   seed: { users: User[]; policies: Policy[] },
 ): Promise<void> {
-  for (const u of seed.users) {
-    await owner.query(
-      `INSERT INTO users (id, display_name, roles, member_id, service_account)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, roles = EXCLUDED.roles,
-         member_id = EXCLUDED.member_id, service_account = EXCLUDED.service_account`,
-      [u.id, u.display_name, u.roles, u.member_id, u.service_account],
-    );
-  }
-  for (const p of seed.policies) {
-    await owner.query(
-      `INSERT INTO policies (id, member_id, product, coverage_limit, currency, effective_from, effective_to)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (id) DO UPDATE SET member_id = EXCLUDED.member_id, product = EXCLUDED.product,
-         coverage_limit = EXCLUDED.coverage_limit, currency = EXCLUDED.currency,
-         effective_from = EXCLUDED.effective_from, effective_to = EXCLUDED.effective_to`,
-      [
-        p.id,
-        p.member_id,
-        p.product,
-        p.coverage_limit,
-        p.currency,
-        p.effective_from,
-        p.effective_to,
-      ],
-    );
-  }
+  // One row at a time, in file order.
+  for (const u of seed.users) await upsert(owner, UserEntity, { ...u });
+  for (const p of seed.policies) await upsert(owner, PolicyEntity, { ...p });
+}
+
+/** INSERT … ON CONFLICT (id) DO UPDATE of every other column. */
+async function upsert<T extends ObjectLiteral>(
+  owner: DataSource,
+  entity: EntitySchema<T>,
+  row: QueryDeepPartialEntity<T>,
+) {
+  const columns = owner
+    .getMetadata(entity)
+    .columns.filter((c) => !c.isPrimary)
+    .map((c) => c.databaseName);
+  await owner
+    .createQueryBuilder()
+    .insert()
+    .into(entity)
+    .values(row)
+    .orUpdate(columns, ['id'])
+    .updateEntity(false)
+    .execute();
+}
+
+/** Applies pending migrations, each in its own transaction; returns what ran and what did not. */
+export async function runMigrations(
+  owner: DataSource,
+): Promise<{ applied: string[]; skipped: string[] }> {
+  const ran = await owner.runMigrations({ transaction: 'each' });
+  const applied = ran.map((m) => m.name);
+  const skipped = owner.migrations
+    .map((m) => m.name ?? m.constructor.name)
+    .filter((name) => !applied.includes(name));
+  return { applied, skipped };
 }

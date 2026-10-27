@@ -283,6 +283,51 @@ describe('preconditions', () => {
     expect(error.message).toContain('must be a whole number of VND');
   });
 
+  it('keeps a refusal small whatever the request sends', () => {
+    const h = new EngineHarness();
+    const input: Record<string, unknown> = {
+      policy_id: 'POL-001',
+      claim_type: 'x'.repeat(100_000),
+      claimed_amount: 1_000_000,
+      treatment_date: '2026-10-15',
+    };
+    for (let i = 0; i < 1000; i++) input[`extra_${i}`] = i;
+    const error = h.fail(null, 'submit_claim', 'u_member_01', input);
+    expect(error.code).toBe('INVALID_INPUT');
+    const unknown = error.details.input_errors?.filter((e) => e.message.startsWith('unknown'));
+    expect(unknown).toHaveLength(5);
+    expect(error.message).toContain('995 more unknown inputs');
+    expect(error.message.length).toBeLessThan(2000);
+  });
+
+  it('treats names of inherited members as unknown inputs', () => {
+    const h = new EngineHarness();
+    const error = h.fail(null, 'submit_claim', 'u_member_01', {
+      policy_id: 'POL-001',
+      claim_type: 'outpatient',
+      claimed_amount: 1_000_000,
+      treatment_date: '2026-10-15',
+      toString: 'x',
+    });
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.details.input_errors?.map((e) => e.input)).toEqual(['toString']);
+  });
+
+  it('records the hash of each outbox payload in the audit effects', () => {
+    const h = new EngineHarness();
+    const claimNo = h.submit();
+    h.toAssessment(claimNo);
+    h.assess(claimNo, 2_000_000);
+    h.ok(claimNo, 'approve', 'u_assessor_01');
+    const pay = h.ok(claimNo, 'initiate_payment', 'u_finance_01');
+    const [message] = pay.outbox;
+    expect(pay.effects).toContainEqual({
+      type: 'trigger_payment',
+      idempotency_key: message?.idempotency_key,
+      payload_hash: hashValue(message?.payload),
+    });
+  });
+
   it('checks policy cover and the filing deadline at submission', () => {
     const h = new EngineHarness();
     const error = h.fail(null, 'submit_claim', 'u_member_01', {

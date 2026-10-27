@@ -149,11 +149,36 @@ describe.skipIf(!hasDatabase)('HTTP API', () => {
       headers: as('u_assessor_01'),
       payload: {},
     });
-    const audit = (await server.inject({ url: `/api/claims/${claimNo}/audit` })).json();
+    const read = (url: string, user = 'u_assessor_01') => server.inject({ url, headers: as(user) });
+    const audit = (await read(`/api/claims/${claimNo}/audit`)).json();
     expect(audit.map((e: { transition_id: string }) => e.transition_id)).toEqual(['submit_claim']);
-    const denied = (await server.inject({ url: `/api/claims/${claimNo}/denied` })).json();
+    const denied = (await read(`/api/claims/${claimNo}/denied`)).json();
     expect(denied.map((d: { error_code: string }) => d.error_code)).toEqual(['INVALID_TRANSITION']);
-    const verify = (await server.inject({ url: `/api/claims/${claimNo}/verify` })).json();
+    const verify = (await read(`/api/claims/${claimNo}/verify`)).json();
     expect(verify).toMatchObject({ ok: true, entries: 1 });
+  });
+
+  it('shows a policyholder their own claims only, and operator data to staff only', async () => {
+    const claimNo = await submit();
+    const read = (url: string, user: string) => server.inject({ url, headers: as(user) });
+
+    expect((await read(`/api/claims/${claimNo}`, 'u_member_01')).statusCode).toBe(200);
+    expect((await read(`/api/claims/${claimNo}/audit`, 'u_member_02')).statusCode).toBe(404);
+    expect((await read(`/api/claims/${claimNo}/verify`, 'u_member_02')).statusCode).toBe(404);
+    const theirs = (await read('/api/claims', 'u_member_02')).json();
+    expect(theirs.map((c: { claim_no: string }) => c.claim_no)).not.toContain(claimNo);
+    const policies = (await read('/api/policies', 'u_member_02')).json();
+    expect(new Set(policies.map((p: { member_id: string }) => p.member_id))).toEqual(
+      new Set(['MEM-002']),
+    );
+
+    expect((await read(`/api/claims/${claimNo}/outbox`, 'u_member_01')).statusCode).toBe(403);
+    expect((await read(`/api/claims/${claimNo}/outbox`, 'u_clerk_01')).statusCode).toBe(200);
+    const run = await server.inject({
+      method: 'POST',
+      url: '/api/system/run',
+      headers: as('u_member_01'),
+    });
+    expect(run.statusCode).toBe(403);
   });
 });

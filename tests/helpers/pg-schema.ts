@@ -37,6 +37,8 @@ export interface TestDb {
   clock: ManualClock;
   /** Connected as claims_app, like the CLI and API. */
   app: AppContext;
+  /** Plain pg pool as claims_app, for checks of the runtime role's privileges. */
+  appPool: pg.Pool;
   /** Connected as claims_owner, for privileged checks and tampering. */
   owner: pg.Pool;
   /** Another app (e.g. a newer workflow version) on the same schema; closed with the rest. */
@@ -57,15 +59,18 @@ export async function createTestDb(label: string, workflow?: CompiledWorkflow): 
     return app;
   };
   const app = await openApp(workflow ?? loadWorkflowFile(BASE_WORKFLOW));
+  const appPool = createPool(appUrl(), schema, 2);
   const owner = createPool(ownerUrl(), schema, 2);
   return {
     schema,
     clock,
     app,
+    appPool,
     owner,
     openApp,
     async close() {
       for (const a of apps) await a.close();
+      await appPool.end();
       // Audit tables reject TRUNCATE and DELETE, so a clean slate means dropping the schema.
       await owner.query(`DROP SCHEMA ${schema} CASCADE`);
       await owner.end();

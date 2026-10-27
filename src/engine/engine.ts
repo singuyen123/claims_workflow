@@ -193,6 +193,24 @@ function pathTo(wf: CompiledWorkflow, state: string, t: CompiledTransition): str
 
 // ── inputs ────────────────────────────────────────────────────────────────────────────────────
 
+/** Unknown inputs named in a refusal; the rest are only counted. */
+const MAX_UNKNOWN_REPORTED = 5;
+/** Characters of an input value or name echoed in a refusal. */
+const MAX_ECHO = 60;
+
+/** Cuts text echoed from a request, so a refusal (and its stored copy) stays small. */
+function clip(text: string): string {
+  if (text.length <= MAX_ECHO) return text;
+  // Never end on half of a surrogate pair.
+  return `${text.slice(0, MAX_ECHO).replace(/[\uD800-\uDBFF]$/, '')}…`;
+}
+
+/** A request value as JSON for a refusal message, cut short. */
+function echo(value: unknown): string {
+  if (typeof value === 'string') return `"${clip(value)}"`;
+  return clip(JSON.stringify(value) ?? String(value));
+}
+
 function coerceInput(
   name: string,
   def: InputDef,
@@ -215,7 +233,7 @@ function coerceInput(
       const n = typeof value === 'string' && /^-?\d+$/.test(value.trim()) ? Number(value) : value;
       if (typeof n !== 'number' || !Number.isSafeInteger(n)) {
         return {
-          error: `${label} must be a whole number${def.type === 'money' ? ' of VND' : ''} (got ${JSON.stringify(value)})`,
+          error: `${label} must be a whole number${def.type === 'money' ? ' of VND' : ''} (got ${echo(value)})`,
         };
       }
       if (def.min !== undefined && n < def.min) return { error: `${label} must be ≥ ${def.min}` };
@@ -231,7 +249,7 @@ function coerceInput(
         return { value };
       }
       return {
-        error: `${label} must be a date in YYYY-MM-DD format (got ${JSON.stringify(value)})`,
+        error: `${label} must be a date in YYYY-MM-DD format (got ${echo(value)})`,
       };
     case 'timestamp': {
       const date = toDate(value);
@@ -243,13 +261,13 @@ function coerceInput(
       const values = wf.enums[def.enum ?? ''] ?? [];
       if (typeof value === 'string' && values.includes(value)) return { value };
       return {
-        error: `${label} must be one of ${values.join(', ')} (got ${JSON.stringify(value)}).${didYouMean(String(value), values)}`,
+        error: `${label} must be one of ${values.join(', ')} (got ${echo(value)}).${didYouMean(String(value), values)}`,
       };
     }
     case 'user_ref': {
       if (typeof value !== 'string') return { error: `${label} must be a user id` };
       const user = refs.getUser(value);
-      if (!user) return { error: `${label}: unknown user '${value}'` };
+      if (!user) return { error: `${label}: unknown user '${clip(value)}'` };
       if (def.role && !user.roles.includes(def.role)) {
         return { error: `${label}: user ${value} does not hold role ${def.role}` };
       }
@@ -257,7 +275,7 @@ function coerceInput(
     }
     case 'policy_ref':
       if (typeof value === 'string' && refs.policy?.id === value) return { value };
-      return { error: `${label}: unknown policy ${JSON.stringify(value)}` };
+      return { error: `${label}: unknown policy ${echo(value)}` };
   }
 }
 
@@ -269,14 +287,19 @@ function normalizeInputs(
 ): { values: Record<string, unknown>; missing: string[] } {
   const accepted: Record<string, InputDef> = { notes: NOTES_INPUT, ...t.inputs };
   const errors: Array<{ input: string; message: string }> = [];
-  for (const key of Object.keys(raw)) {
-    if (!(key in accepted)) {
-      errors.push({
-        input: key,
-        message: `unknown input '${key}' (accepted: ${Object.keys(accepted).join(', ')}).${didYouMean(key, Object.keys(accepted))}`,
-      });
-    }
-  }
+  // Own keys only: `constructor` or `toString` are unknown inputs, not inherited members.
+  const names = Object.keys(accepted);
+  const unknown = Object.keys(raw).filter((key) => !Object.hasOwn(accepted, key));
+  const more = unknown.length - MAX_UNKNOWN_REPORTED;
+  unknown.slice(0, MAX_UNKNOWN_REPORTED).forEach((key, i) => {
+    errors.push({
+      input: clip(key),
+      message:
+        `unknown input '${clip(key)}'${i === 0 ? ` (accepted: ${names.join(', ')})` : ''}.` +
+        didYouMean(key, names) +
+        (i === MAX_UNKNOWN_REPORTED - 1 && more > 0 ? ` ${more} more unknown inputs.` : ''),
+    });
+  });
   const values: Record<string, unknown> = {};
   const missing: string[] = [];
   for (const [name, def] of Object.entries(accepted)) {
@@ -577,7 +600,8 @@ function buildPlan(
     effects.push({ type: effect.type, path: effect.path });
   }
 
-  // External effects see the final state of the claim.
+  // External effects see the final state of the claim. Each one's audit record carries the hash
+  // of its outbox payload, so the chained entry vouches for what the worker will deliver.
   const finalCtx = buildContext(wf, after, refs.policy, actor, input, env.now);
   const text = (template: string) => renderText(template, (path) => lookup(finalCtx, path));
   const outbox: OutboxDraft[] = [];
@@ -586,43 +610,47 @@ function buildPlan(
       const tpl = wf.definition.templates[effect.template];
       if (!tpl) return;
       const key = `notify:${entryId}:${index}`;
-      outbox.push({
-        effect_type: 'notify',
+      const payload = {
+        template: effect.template,
+        channel: tpl.channel,
+        to: recipient(tpl.to, finalCtx, after),
+        subject: tpl.subject ? text(tpl.subject) : null,
+        body: text(tpl.body),
+        claim_id: after.id,
+        claim_no: after.claim_no,
+      };
+      outbox.push({ effect_type: 'notify', idempotency_key: key, payload });
+      effects.push({
+        type: 'notify',
+        template: effect.template,
         idempotency_key: key,
-        payload: {
-          template: effect.template,
-          channel: tpl.channel,
-          to: recipient(tpl.to, finalCtx, after),
-          subject: tpl.subject ? text(tpl.subject) : null,
-          body: text(tpl.body),
-          claim_id: after.id,
-          claim_no: after.claim_no,
-        },
+        payload_hash: hashValue(payload),
       });
-      effects.push({ type: 'notify', template: effect.template, idempotency_key: key });
     } else if (effect.type === 'trigger_payment') {
       const reference = resolveRef(finalCtx, effect.reference);
       const key = `payment:${after.id}:${String(reference)}`;
-      outbox.push({
-        effect_type: 'trigger_payment',
+      const payload = {
+        claim_id: after.id,
+        claim_no: after.claim_no,
+        amount: resolveRef(finalCtx, effect.amount),
+        currency: 'VND',
+        reference,
+      };
+      outbox.push({ effect_type: 'trigger_payment', idempotency_key: key, payload });
+      effects.push({
+        type: 'trigger_payment',
         idempotency_key: key,
-        payload: {
-          claim_id: after.id,
-          claim_no: after.claim_no,
-          amount: resolveRef(finalCtx, effect.amount),
-          currency: 'VND',
-          reference,
-        },
+        payload_hash: hashValue(payload),
       });
-      effects.push({ type: 'trigger_payment', idempotency_key: key });
     } else if (effect.type === 'log') {
       const key = `log:${entryId}:${index}`;
-      outbox.push({
-        effect_type: 'log',
-        idempotency_key: key,
-        payload: { message: text(effect.message), claim_id: after.id, claim_no: after.claim_no },
-      });
-      effects.push({ type: 'log', idempotency_key: key });
+      const payload = {
+        message: text(effect.message),
+        claim_id: after.id,
+        claim_no: after.claim_no,
+      };
+      outbox.push({ effect_type: 'log', idempotency_key: key, payload });
+      effects.push({ type: 'log', idempotency_key: key, payload_hash: hashValue(payload) });
     }
   });
 

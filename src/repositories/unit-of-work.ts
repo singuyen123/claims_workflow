@@ -28,4 +28,9 @@ export interface UnitOfWork {
    * repositories it receives share the transaction's connection, which is released afterwards.
    */
   transaction<T>(fn: (tx: Repositories) => Promise<T>): Promise<T>;
+  /**
+   * Runs `fn` in one REPEATABLE READ transaction, so several reads see the same committed state
+   * (a claim and its audit trail, for instance). For reads only.
+   */
+  snapshot<T>(fn: (tx: Repositories) => Promise<T>): Promise<T>;
 }

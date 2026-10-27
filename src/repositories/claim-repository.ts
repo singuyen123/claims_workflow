@@ -11,6 +11,6 @@ export interface ClaimRepository {
   update(claim: ClaimSnapshot, expectedVersion: number): Promise<boolean>;
   /** Next claim number of the year (CLM-YYYY-NNNNNN); numbers are never reused. */
   nextClaimNo(year: number): Promise<string>;
-  /** Newest first. */
+  /** Newest first; `filter.after` continues from a claim of the previous page. */
   list(filter?: ClaimFilter): Promise<ClaimSnapshot[]>;
 }

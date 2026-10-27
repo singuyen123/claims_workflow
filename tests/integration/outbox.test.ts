@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { OutboxMessage } from '../../src/domain/types';
 import { createPgRepositories } from '../../src/repositories/postgres/unit-of-work';
 import { HANDLERS } from '../../src/services/effect-handlers';
+import { RETRY_POLICIES } from '../../src/services/retry-policy';
 import { createTestDb, Driver, hasDatabase, type TestDb } from '../helpers/pg-schema';
 
 async function until(check: () => Promise<boolean>, timeoutMs = 5000) {
@@ -64,7 +65,7 @@ describe.skipIf(!hasDatabase)('outbox delivery', () => {
   it('a message whose worker died is taken again after the lease expires', async () => {
     const claimNo = await d.submit();
     const claim = await d.services.queries.requireClaim(claimNo);
-    const { outbox } = createPgRepositories(db.app.pool);
+    const { outbox } = createPgRepositories(db.app.dataSource.manager);
     const [leased] = await outbox.lease('crashed-worker', db.clock.now(), 30_000, 1);
     expect(leased?.claim_id).toBe(claim.id);
 
@@ -97,21 +98,33 @@ describe.skipIf(!hasDatabase)('outbox delivery', () => {
     });
   });
 
-  it('a message that keeps failing goes DEAD and can be retried by an operator', async () => {
+  it('a payment keeps retrying for hours, then goes DEAD and can be retried by an operator', async () => {
     const claimNo = await d.approved(1_000_000);
     await worker('w').drain();
-    await db.app.services.operations.failNextPayments(10);
+    const { maxAttempts } = RETRY_POLICIES.trigger_payment;
+    await db.app.services.operations.failNextPayments(maxAttempts);
     const started = await d.ok(claimNo, 'initiate_payment', 'u_finance_01');
+    const queuedAt = db.clock.now().getTime();
     await worker('w').drain();
     const dead = (
       await db.app.services.operations.outbox({ claim: started.claim.id, status: 'DEAD' })
     )[0];
-    expect(dead).toMatchObject({ effect_type: 'trigger_payment', attempts: 5 });
+    expect(dead).toMatchObject({
+      effect_type: 'trigger_payment',
+      attempts: maxAttempts,
+      max_attempts: maxAttempts,
+    });
     expect(dead?.last_error).toContain('injected fault');
+    expect(db.clock.now().getTime() - queuedAt).toBeGreaterThan(6 * 3_600_000);
     expect(await db.app.services.operations.payments(started.claim.id)).toEqual([]);
 
-    await db.app.services.operations.failNextPayments(0);
-    expect(await db.app.services.operations.retryOutbox(dead?.id as number)).toBe(true);
+    expect(
+      await db.app.services.operations.retryDeadOutbox({
+        claim: started.claim.id,
+        effect_type: 'trigger_payment',
+      }),
+    ).toBe(1);
+    expect(await db.app.services.operations.retryOutbox(dead?.id as number)).toBe(false);
     await worker('w').drain();
     expect(await db.app.services.operations.payments(started.claim.id)).toHaveLength(1);
   });
@@ -123,7 +136,7 @@ describe.skipIf(!hasDatabase)('outbox delivery', () => {
       (m) => m.effect_type === 'trigger_payment',
     );
     const ctx = {
-      gateway: createPgRepositories(db.app.pool).mockGateway,
+      gateway: createPgRepositories(db.app.dataSource.manager).mockGateway,
       now: db.clock.now(),
       log: () => undefined,
     };

@@ -1,17 +1,14 @@
+import type { EntityManager } from 'typeorm';
 import type { AuditEntry, DeniedAttempt } from '../../domain/types';
-import type { Db } from '../../infra/db/pool';
 import type {
   AuditRepository,
   ChainHead,
   DeniedAttemptRepository,
   DeniedRecord,
 } from '../audit-repository';
+import { AuditEntity } from './entities/audit-entry';
+import { DeniedEntity } from './entities/denied-attempt';
 import { iso } from './rows';
-
-const COLUMNS =
-  'entry_id, claim_id, claim_seq, transition_id, from_state, to_state, actor_user_id, actor_role, ' +
-  'reason, notes, input, changes, decision_context, effects, config_hash, claim_version, ' +
-  'snapshot_hash, prev_hash, hash, occurred_at';
 
 export function rowToEntry(row: Record<string, unknown>): AuditEntry {
   return {
@@ -39,93 +36,71 @@ export function rowToEntry(row: Record<string, unknown>): AuditEntry {
 }
 
 export class PgAuditRepository implements AuditRepository {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly manager: EntityManager) {}
+
+  private get repo() {
+    return this.manager.getRepository(AuditEntity);
+  }
 
   async insert(e: AuditEntry): Promise<void> {
-    await this.db.query(
-      `INSERT INTO audit_log (${COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
-      [
-        e.entry_id,
-        e.claim_id,
-        e.claim_seq,
-        e.transition_id,
-        e.from_state,
-        e.to_state,
-        e.actor_user_id,
-        e.actor_role,
-        e.reason,
-        e.notes,
-        JSON.stringify(e.input),
-        JSON.stringify(e.changes),
-        JSON.stringify(e.decision_context),
-        JSON.stringify(e.effects),
-        e.config_hash,
-        e.claim_version,
-        e.snapshot_hash,
-        e.prev_hash,
-        e.hash,
-        e.occurred_at,
-      ],
-    );
+    await this.repo
+      .createQueryBuilder()
+      .insert()
+      .values({ ...e })
+      .updateEntity(false)
+      .execute();
   }
 
   async list(claimId: string): Promise<AuditEntry[]> {
-    const { rows } = await this.db.query(
-      `SELECT ${COLUMNS} FROM audit_log WHERE claim_id = $1 ORDER BY claim_seq`,
-      [claimId],
-    );
+    const rows = await this.repo.find({
+      where: { claim_id: claimId },
+      order: { claim_seq: 'ASC' },
+    });
     return rows.map(rowToEntry);
   }
 
   async find(entryId: string): Promise<AuditEntry | null> {
-    const { rows } = await this.db.query(`SELECT ${COLUMNS} FROM audit_log WHERE entry_id = $1`, [
-      entryId,
-    ]);
-    return rows[0] ? rowToEntry(rows[0]) : null;
+    const row = await this.repo.findOneBy({ entry_id: entryId });
+    return row ? rowToEntry(row) : null;
   }
 
   async head(claimId: string): Promise<ChainHead | null> {
-    const { rows } = await this.db.query<ChainHead>(
-      'SELECT claim_seq, hash FROM audit_log WHERE claim_id = $1 ORDER BY claim_seq DESC LIMIT 1',
-      [claimId],
-    );
-    return rows[0] ?? null;
+    const row = await this.repo.findOne({
+      select: { claim_seq: true, hash: true },
+      where: { claim_id: claimId },
+      order: { claim_seq: 'DESC' },
+    });
+    return row ? { claim_seq: row.claim_seq, hash: row.hash } : null;
   }
 }
 
 export class PgDeniedAttemptRepository implements DeniedAttemptRepository {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly manager: EntityManager) {}
+
+  private get repo() {
+    return this.manager.getRepository(DeniedEntity);
+  }
 
   async record(d: DeniedRecord): Promise<boolean> {
     const bucket = new Date(d.occurred_at);
     bucket.setUTCSeconds(0, 0);
-    const result = await this.db.query(
-      `INSERT INTO denied_attempts
-         (claim_id, actor_user_id, actor_role, transition_id, error_code, message, details, occurred_at, bucket_start)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT ON CONSTRAINT denied_attempts_dedupe DO NOTHING`,
-      [
-        d.claim_id,
-        d.actor_user_id,
-        d.actor_role,
-        d.transition_id,
-        d.error_code,
-        d.message,
-        JSON.stringify(d.details),
-        d.occurred_at,
-        bucket.toISOString(),
-      ],
-    );
-    return result.rowCount === 1;
+    // The only unique constraint besides the key is denied_attempts_dedupe.
+    const result = await this.repo
+      .createQueryBuilder()
+      .insert()
+      .values({ ...d, bucket_start: bucket.toISOString() })
+      .orIgnore()
+      .returning('id')
+      .updateEntity(false)
+      .execute();
+    return (result.raw as unknown[]).length === 1;
   }
 
   async list(claimId?: string): Promise<DeniedAttempt[]> {
-    const { rows } = await this.db.query(
-      `SELECT id, claim_id, actor_user_id, actor_role, transition_id, error_code, message, details, occurred_at
-         FROM denied_attempts ${claimId ? 'WHERE claim_id = $1' : ''} ORDER BY id`,
-      claimId ? [claimId] : [],
-    );
+    const rows = await this.repo.find({
+      where: claimId ? { claim_id: claimId } : {},
+      order: { id: 'ASC' },
+    });
     return rows.map((r) => ({
       id: r.id,
       claim_id: r.claim_id,
@@ -134,7 +109,7 @@ export class PgDeniedAttemptRepository implements DeniedAttemptRepository {
       transition_id: r.transition_id,
       error_code: r.error_code,
       message: r.message,
-      details: r.details,
+      details: r.details as Record<string, unknown>,
       occurred_at: iso(r.occurred_at),
     }));
   }

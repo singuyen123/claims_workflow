@@ -38,7 +38,10 @@ export function App() {
   const [acting, setActingState] = useState<Acting>(loadActing);
   const [route, navigate] = useRoute();
   const users = useQuery({ queryKey: ['users'], queryFn: () => api<User[]>('/users') });
-  const policies = useQuery({ queryKey: ['policies'], queryFn: () => api<Policy[]>('/policies') });
+  const policies = useQuery({
+    queryKey: ['policies', acting.userId],
+    queryFn: () => api<Policy[]>('/policies', { acting }),
+  });
   const workflow = useQuery({
     queryKey: ['workflow'],
     queryFn: () => api<WorkflowSummary>('/workflow'),
@@ -55,15 +58,20 @@ export function App() {
 
   const runScheduler = async () => {
     try {
-      const { results } = await api<{ results: ActResult[] }>('/system/run', { method: 'POST' });
+      const { results, failures } = await api<{
+        results: ActResult[];
+        failures: Array<{ claim_no: string; message: string }>;
+      }>('/system/run', { method: 'POST', acting });
+      const lines = [
+        ...results.map(
+          (r) => `${r.claim.claim_no}: ${r.entry.transition_id} → ${r.entry.to_state}`,
+        ),
+        ...failures.map((f) => `${f.claim_no}: not checked (${f.message})`),
+      ];
       notify({
-        kind: 'info',
+        kind: failures.length ? 'error' : 'info',
         title: 'Scheduler pass',
-        body: results.length
-          ? results
-              .map((r) => `${r.claim.claim_no}: ${r.entry.transition_id} → ${r.entry.to_state}`)
-              .join('\n')
-          : 'No automatic transition is due.',
+        body: lines.length ? lines.join('\n') : 'No automatic transition is due.',
       });
       queryClient.invalidateQueries();
     } catch (error) {

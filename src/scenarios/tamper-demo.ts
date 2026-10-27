@@ -64,6 +64,8 @@ async function main() {
   const clock = new ManualClock();
   const app = await createApp({ schema, clock });
   const owner = createPool(env.ownerUrl(), schema, 2);
+  // Plain connections as the runtime role, to show what it may not do behind the engine.
+  const runtime = createPool(env.databaseUrl(), schema, 2);
   try {
     const s = new ScenarioRun({
       base: app,
@@ -96,9 +98,9 @@ async function main() {
         [claim.id],
       ),
     );
-    await attempt('app role: DELETE FROM audit_log', () => app.pool.query('DELETE FROM audit_log'));
+    await attempt('app role: DELETE FROM audit_log', () => runtime.query('DELETE FROM audit_log'));
     await attempt('app role: UPDATE claims SET state', () =>
-      app.pool.query(`UPDATE claims SET state = 'CLOSED', version = version + 1 WHERE id = $1`, [
+      runtime.query(`UPDATE claims SET state = 'CLOSED', version = version + 1 WHERE id = $1`, [
         claim.id,
       ]),
     );
@@ -130,6 +132,7 @@ async function main() {
       ),
     );
   } finally {
+    await runtime.end();
     await owner.end();
     await app.close();
     if (keep) say(pc.dim(`kept schema ${schema}`));

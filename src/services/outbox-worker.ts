@@ -1,12 +1,20 @@
 import { hostname } from 'node:os';
+import type { OutboxMessage } from '../domain/types';
+import type { AuditRepository } from '../repositories/audit-repository';
 import type { MockGatewayRepository } from '../repositories/mock-gateway-repository';
 import type { OutboxNotifications, OutboxRepository } from '../repositories/outbox-repository';
+import { computeEntryHash } from './audit-chain';
 import { type Clock, ManualClock, systemClock } from './clock';
 import { HANDLERS, type Handler } from './effect-handlers';
+import { RETRY_POLICIES, type RetryPolicy, retryDelayMs } from './retry-policy';
+import { outboxMismatch } from './verify';
 
 export interface WorkerOptions {
   outbox: OutboxRepository;
   notifications: OutboxNotifications;
+  /** Every message is checked against its audit entry before it is delivered. */
+  audit: AuditRepository;
+  auditKey: string;
   /** What the handlers deliver to. */
   gateway: MockGatewayRepository;
   clock?: Clock;
@@ -16,6 +24,10 @@ export interface WorkerOptions {
   pollMs?: number;
   log?: (line: string) => void;
   handlers?: Partial<Record<keyof typeof HANDLERS, Handler>>;
+  /** Retry delays per effect type; defaults to RETRY_POLICIES. */
+  policies?: Partial<Record<keyof typeof HANDLERS, RetryPolicy>>;
+  /** Source of retry jitter in [0, 1); the scenario runner fixes it for reproducible output. */
+  random?: () => number;
 }
 
 export interface RoundResult {
@@ -23,11 +35,6 @@ export interface RoundResult {
   done: number;
   failed: number;
   dead: number;
-}
-
-/** 1 s, 2 s, 4 s … capped at one minute. */
-export function backoffMs(attempt: number): number {
-  return Math.min(60_000, 1000 * 2 ** Math.max(0, attempt - 1));
 }
 
 /**
@@ -62,12 +69,16 @@ export class OutboxWorker {
       const handler = this.handlers[message.effect_type];
       try {
         if (!handler) throw new Error(`no handler for effect type ${message.effect_type}`);
+        await this.checkVouched(message);
         const output = await handler(message, { gateway, now: this.clock.now(), log: this.log });
         await outbox.markDone(message.id, this.workerId, this.clock.now(), output);
         result.done++;
       } catch (error) {
         const reason = (error as Error).message;
-        const retryAt = new Date(this.clock.now().getTime() + backoffMs(message.attempts));
+        const policy =
+          this.options.policies?.[message.effect_type] ?? RETRY_POLICIES[message.effect_type];
+        const delay = retryDelayMs(policy, message.attempts, this.options.random);
+        const retryAt = new Date(this.clock.now().getTime() + delay);
         const status = await outbox.markFailed(message.id, this.workerId, retryAt, reason);
         if (status === 'DEAD') {
           result.dead++;
@@ -83,6 +94,23 @@ export class OutboxWorker {
       }
     }
     return result;
+  }
+
+  /**
+   * Refuses a message that its audit entry does not vouch for: an entry with a valid HMAC that
+   * lists the message's key, type and payload hash. The runtime role can insert outbox rows, so
+   * without this a row written by application-level SQL would be delivered (a payment, say).
+   */
+  private async checkVouched(message: OutboxMessage): Promise<void> {
+    const entry = await this.options.audit.find(message.audit_entry_id);
+    if (entry) {
+      const { hash, ...draft } = entry;
+      if (computeEntryHash(this.options.auditKey, draft) !== hash) {
+        throw new Error(`audit entry ${entry.entry_id} fails its HMAC check; not delivering`);
+      }
+    }
+    const mismatch = outboxMismatch(entry ?? undefined, message);
+    if (mismatch) throw new Error(`${mismatch}; not delivering`);
   }
 
   /**

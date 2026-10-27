@@ -35,8 +35,8 @@ export function ClaimDetail({ claimNo, acting, users, policies, notify }: Props)
     queryFn: () => api<Detail>(`/claims/${claimNo}`, { acting }),
   });
   const audit = useQuery({
-    queryKey: ['audit', claimNo],
-    queryFn: () => api<AuditEntry[]>(`/claims/${claimNo}/audit`),
+    queryKey: ['audit', claimNo, acting.userId],
+    queryFn: () => api<AuditEntry[]>(`/claims/${claimNo}/audit`, { acting }),
   });
 
   const refresh = () => {
@@ -47,7 +47,7 @@ export function ClaimDetail({ claimNo, acting, users, policies, notify }: Props)
 
   const verify = async () => {
     try {
-      const report = await api<VerifyReport>(`/claims/${claimNo}/verify`);
+      const report = await api<VerifyReport>(`/claims/${claimNo}/verify`, { acting });
       notify(
         report.ok
           ? {
@@ -184,19 +184,30 @@ export function ClaimDetail({ claimNo, acting, users, policies, notify }: Props)
         {tab === 'audit' && audit.data && (
           <AuditTimeline entries={audit.data} workflow={workflow} />
         )}
-        {tab === 'denied' && <DeniedList claimNo={claimNo} />}
-        {tab === 'notifications' && <NotificationList claimNo={claimNo} />}
-        {tab === 'outbox' && <OutboxList claimNo={claimNo} />}
+        {tab === 'denied' && <DeniedList claimNo={claimNo} acting={acting} />}
+        {tab === 'notifications' && <NotificationList claimNo={claimNo} acting={acting} />}
+        {tab === 'outbox' && <OutboxList claimNo={claimNo} acting={acting} />}
       </section>
     </div>
   );
 }
 
-function DeniedList({ claimNo }: { claimNo: string }) {
+interface ListProps {
+  claimNo: string;
+  acting: Acting;
+}
+
+/** Policyholders may not see operator data: the API refuses, the tab says why. */
+function Refused({ error }: { error: Error }) {
+  return <p className="text-sm text-slate-500">{error.message}</p>;
+}
+
+function DeniedList({ claimNo, acting }: ListProps) {
   const denied = useQuery({
-    queryKey: ['denied', claimNo],
-    queryFn: () => api<DeniedAttempt[]>(`/claims/${claimNo}/denied`),
+    queryKey: ['denied', claimNo, acting.userId],
+    queryFn: () => api<DeniedAttempt[]>(`/claims/${claimNo}/denied`, { acting }),
   });
+  if (denied.isError) return <Refused error={denied.error} />;
   if (!denied.data?.length) return <p className="text-sm text-slate-500">No refused attempts.</p>;
   return (
     <table className="w-full text-left text-sm">
@@ -227,12 +238,13 @@ function DeniedList({ claimNo }: { claimNo: string }) {
   );
 }
 
-function NotificationList({ claimNo }: { claimNo: string }) {
+function NotificationList({ claimNo, acting }: ListProps) {
   const list = useQuery({
-    queryKey: ['notifications', claimNo],
-    queryFn: () => api<MockNotification[]>(`/claims/${claimNo}/notifications`),
+    queryKey: ['notifications', claimNo, acting.userId],
+    queryFn: () => api<MockNotification[]>(`/claims/${claimNo}/notifications`, { acting }),
     refetchInterval: 2000,
   });
+  if (list.isError) return <Refused error={list.error} />;
   if (!list.data?.length) {
     return (
       <p className="text-sm text-slate-500">
@@ -257,12 +269,13 @@ function NotificationList({ claimNo }: { claimNo: string }) {
   );
 }
 
-function OutboxList({ claimNo }: { claimNo: string }) {
+function OutboxList({ claimNo, acting }: ListProps) {
   const list = useQuery({
-    queryKey: ['outbox', claimNo],
-    queryFn: () => api<OutboxMessage[]>(`/claims/${claimNo}/outbox`),
+    queryKey: ['outbox', claimNo, acting.userId],
+    queryFn: () => api<OutboxMessage[]>(`/claims/${claimNo}/outbox`, { acting }),
     refetchInterval: 2000,
   });
+  if (list.isError) return <Refused error={list.error} />;
   if (!list.data?.length) return <p className="text-sm text-slate-500">No side effects queued.</p>;
   return (
     <table className="w-full text-left text-sm">

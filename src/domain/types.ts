@@ -103,6 +103,14 @@ export interface ClaimFilter {
   assessorId?: string;
   memberId?: string;
   limit?: number;
+  /** Keyset paging: only claims listed after this one (claims are listed newest first). */
+  after?: ClaimCursor;
+}
+
+/** Position of a claim in the newest-first listing. */
+export interface ClaimCursor {
+  created_at: string;
+  claim_no: string;
 }
 
 /** A workflow definition as registered in `workflow_definitions`. */

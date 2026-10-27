@@ -1,5 +1,4 @@
-import type pg from 'pg';
-import { type Db, inTransaction } from '../../infra/db/pool';
+import type { DataSource, EntityManager } from 'typeorm';
 import type { Repositories, UnitOfWork } from '../unit-of-work';
 import { PgAuditRepository, PgDeniedAttemptRepository } from './audit-repository';
 import { PgClaimRepository } from './claim-repository';
@@ -9,29 +8,35 @@ import { PgMockGatewayRepository } from './mock-gateway-repository';
 import { PgOutboxRepository } from './outbox-repository';
 import { PgPolicyRepository, PgUserRepository } from './reference-repository';
 
-/** Every repository on one connection (a pool, or the client of a transaction). */
-export function createPgRepositories(db: Db): Repositories {
+/** Every repository on one entity manager (the data source's, or a transaction's). */
+export function createPgRepositories(manager: EntityManager): Repositories {
   return {
-    claims: new PgClaimRepository(db),
-    audit: new PgAuditRepository(db),
-    denied: new PgDeniedAttemptRepository(db),
-    outbox: new PgOutboxRepository(db),
-    users: new PgUserRepository(db),
-    policies: new PgPolicyRepository(db),
-    definitions: new PgDefinitionRepository(db),
-    idempotency: new PgIdempotencyRepository(db),
-    mockGateway: new PgMockGatewayRepository(db),
+    claims: new PgClaimRepository(manager),
+    audit: new PgAuditRepository(manager),
+    denied: new PgDeniedAttemptRepository(manager),
+    outbox: new PgOutboxRepository(manager),
+    users: new PgUserRepository(manager),
+    policies: new PgPolicyRepository(manager),
+    definitions: new PgDefinitionRepository(manager),
+    idempotency: new PgIdempotencyRepository(manager),
+    mockGateway: new PgMockGatewayRepository(manager),
   };
 }
 
 export class PgUnitOfWork implements UnitOfWork {
   readonly repos: Repositories;
 
-  constructor(private readonly pool: pg.Pool) {
-    this.repos = createPgRepositories(pool);
+  constructor(private readonly dataSource: DataSource) {
+    this.repos = createPgRepositories(dataSource.manager);
   }
 
   transaction<T>(fn: (tx: Repositories) => Promise<T>): Promise<T> {
-    return inTransaction(this.pool, (client) => fn(createPgRepositories(client)));
+    return this.dataSource.transaction((manager) => fn(createPgRepositories(manager)));
+  }
+
+  snapshot<T>(fn: (tx: Repositories) => Promise<T>): Promise<T> {
+    return this.dataSource.transaction('REPEATABLE READ', (manager) =>
+      fn(createPgRepositories(manager)),
+    );
   }
 }

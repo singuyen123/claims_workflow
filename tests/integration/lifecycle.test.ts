@@ -85,9 +85,10 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
       reason: 'Waiting period',
     });
 
-    expect(await d.services.claims.runSystem(claimNo)).toEqual([]);
+    expect(await d.services.claims.runSystem(claimNo)).toEqual({ results: [], failures: [] });
     db.clock.advance(31 * DAY);
-    const results = await d.services.claims.runSystem();
+    const { results, failures } = await d.services.claims.runSystem();
+    expect(failures).toEqual([]);
     expect(results.map((r) => [r.claim.claim_no, r.entry.transition_id])).toContainEqual([
       claimNo,
       'close_rejected',
@@ -154,7 +155,7 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
     const error = await d.fail(claimNo, 'approve', 'u_assessor_01');
 
     expect(error.code).toBe('INVALID_TRANSITION');
-    expect(error.message).toContain('claim is SUBMITTED');
+    expect(error.message).toContain(`claim ${claimNo} is SUBMITTED`);
     expect(error.details.path_to_target).toEqual([
       'verify_documents',
       'start_assessment',

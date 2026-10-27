@@ -1,6 +1,6 @@
 import type pg from 'pg';
+import type { DataSource, EntityManager } from 'typeorm';
 import type { OutboxMessage, OutboxStatus } from '../../domain/types';
-import type { Db } from '../../infra/db/pool';
 import type {
   OutboxFilter,
   OutboxInsert,
@@ -8,6 +8,7 @@ import type {
   OutboxRepository,
   OutboxSubscription,
 } from '../outbox-repository';
+import { OutboxEntity } from './entities/outbox-message';
 import { iso, isoOrNull } from './rows';
 
 /** NOTIFY channel; the payload is the schema name so workers ignore other schemas' traffic. */
@@ -39,32 +40,37 @@ export function rowToMessage(row: Record<string, unknown>): OutboxMessage {
 }
 
 export class PgOutboxRepository implements OutboxRepository {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly manager: EntityManager) {}
+
+  private get repo() {
+    return this.manager.getRepository(OutboxEntity);
+  }
 
   async enqueue(messages: OutboxInsert[]): Promise<number[]> {
     const ids: number[] = [];
     for (const m of messages) {
-      const { rows } = await this.db.query<{ id: number }>(
-        `INSERT INTO outbox (claim_id, audit_entry_id, effect_type, payload, idempotency_key, next_attempt_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $6)
-         ON CONFLICT (idempotency_key) DO NOTHING
-         RETURNING id`,
-        [
-          m.claim_id,
-          m.audit_entry_id,
-          m.effect_type,
-          JSON.stringify(m.payload),
-          m.idempotency_key,
-          m.created_at,
-        ],
-      );
-      if (rows[0]) ids.push(rows[0].id);
+      const result = await this.repo
+        .createQueryBuilder()
+        .insert()
+        .values({ ...m, next_attempt_at: m.created_at })
+        .orIgnore()
+        .returning('id')
+        .updateEntity(false)
+        .execute();
+      const row = (result.raw as Array<{ id: number }>)[0];
+      if (row) ids.push(row.id);
     }
     return ids;
   }
 
   async notifyWorkers(): Promise<void> {
-    await this.db.query('SELECT pg_notify($1, current_schema())', [OUTBOX_CHANNEL]);
+    // NOTIFY has no ORM API; it is delivered when the transaction commits.
+    await this.manager
+      .createQueryBuilder()
+      .select('pg_notify(:channel, current_schema())')
+      .fromDummy()
+      .setParameters({ channel: OUTBOX_CHANNEL })
+      .getRawOne();
   }
 
   async lease(
@@ -73,32 +79,56 @@ export class PgOutboxRepository implements OutboxRepository {
     leaseMs: number,
     limit: number,
   ): Promise<OutboxMessage[]> {
-    const { rows } = await this.db.query(
-      `UPDATE outbox
-          SET status = 'PROCESSING', locked_by = $1, locked_until = $2, attempts = attempts + 1
-        WHERE id IN (
-          SELECT id FROM outbox
-           WHERE attempts < max_attempts
-             AND ((status IN ('PENDING', 'FAILED') AND next_attempt_at <= $3)
-                  OR (status = 'PROCESSING' AND locked_until < $3))
-           ORDER BY id
-           LIMIT $4
-           FOR UPDATE SKIP LOCKED)
-        RETURNING ${COLUMNS}`,
-      [workerId, new Date(now.getTime() + leaseMs).toISOString(), now.toISOString(), limit],
-    );
-    return rows.map(rowToMessage).sort((a, b) => a.id - b.id);
+    const due = this.repo
+      .createQueryBuilder('o')
+      .select('o.id')
+      .where('o.attempts < o.max_attempts')
+      .andWhere(
+        "((o.status IN ('PENDING', 'FAILED') AND o.next_attempt_at <= :now) OR (o.status = 'PROCESSING' AND o.locked_until < :now))",
+      )
+      .orderBy('o.id')
+      .limit(limit)
+      .setLock('pessimistic_write')
+      .setOnLocked('skip_locked');
+    const result = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({
+        status: 'PROCESSING',
+        locked_by: workerId,
+        locked_until: new Date(now.getTime() + leaseMs).toISOString(),
+        // Increment relative to the stored value: SQL expression, no ORM equivalent.
+        attempts: () => 'attempts + 1',
+      })
+      // UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED): TypeORM has no API for a locked
+      // subquery in an UPDATE, so the builder above renders it.
+      .where(`id IN (${due.getQuery()})`)
+      .setParameters({ now: now.toISOString() })
+      .returning(COLUMNS)
+      .updateEntity(false)
+      .execute();
+    return (result.raw as Array<Record<string, unknown>>)
+      .map(rowToMessage)
+      .sort((a, b) => a.id - b.id);
   }
 
   async reapExpiredLeases(now: Date): Promise<number> {
-    const r = await this.db.query(
-      `UPDATE outbox
-          SET status = 'DEAD', locked_by = NULL, locked_until = NULL,
-              last_error = coalesce(last_error, 'lease expired during the final attempt')
-        WHERE status = 'PROCESSING' AND locked_until < $1 AND attempts >= max_attempts`,
-      [now.toISOString()],
-    );
-    return r.rowCount ?? 0;
+    const result = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({
+        status: 'DEAD',
+        locked_by: null,
+        locked_until: null,
+        // Keep the last real error if there is one: SQL expression over the stored value.
+        last_error: () => "coalesce(last_error, 'lease expired during the final attempt')",
+      })
+      .where("status = 'PROCESSING' AND locked_until < :now AND attempts >= max_attempts", {
+        now: now.toISOString(),
+      })
+      .updateEntity(false)
+      .execute();
+    return result.affected ?? 0;
   }
 
   async markDone(
@@ -107,13 +137,21 @@ export class PgOutboxRepository implements OutboxRepository {
     now: Date,
     result: Record<string, unknown>,
   ): Promise<boolean> {
-    const r = await this.db.query(
-      `UPDATE outbox
-          SET status = 'DONE', processed_at = $3, result = $4, locked_by = NULL, locked_until = NULL, last_error = NULL
-        WHERE id = $1 AND locked_by = $2 AND status = 'PROCESSING'`,
-      [id, workerId, now.toISOString(), JSON.stringify(result)],
-    );
-    return r.rowCount === 1;
+    const r = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({
+        status: 'DONE',
+        processed_at: now.toISOString(),
+        result,
+        locked_by: null,
+        locked_until: null,
+        last_error: null,
+      })
+      .where({ id, locked_by: workerId, status: 'PROCESSING' })
+      .updateEntity(false)
+      .execute();
+    return r.affected === 1;
   }
 
   async markFailed(
@@ -122,58 +160,79 @@ export class PgOutboxRepository implements OutboxRepository {
     retryAt: Date,
     error: string,
   ): Promise<OutboxStatus | null> {
-    const { rows } = await this.db.query<{ status: OutboxStatus }>(
-      `UPDATE outbox
-          SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'FAILED' END,
-              next_attempt_at = $3, last_error = $4, locked_by = NULL, locked_until = NULL
-        WHERE id = $1 AND locked_by = $2 AND status = 'PROCESSING'
-        RETURNING status`,
-      [id, workerId, retryAt.toISOString(), error.slice(0, 2000)],
-    );
-    return rows[0]?.status ?? null;
+    const r = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({
+        // Decided from the stored counters in the same statement: SQL expression.
+        status: () => "CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'FAILED' END",
+        next_attempt_at: retryAt.toISOString(),
+        last_error: error.slice(0, 2000),
+        locked_by: null,
+        locked_until: null,
+      })
+      .where({ id, locked_by: workerId, status: 'PROCESSING' })
+      .returning('status')
+      .updateEntity(false)
+      .execute();
+    return (r.raw as Array<{ status: OutboxStatus }>)[0]?.status ?? null;
   }
 
   async nextDueAt(): Promise<Date | null> {
-    const { rows } = await this.db.query<{ next: Date | null }>(
-      `SELECT min(next_attempt_at) AS next FROM outbox
-        WHERE status IN ('PENDING', 'FAILED') AND attempts < max_attempts`,
-    );
-    return rows[0]?.next ?? null;
+    const row = await this.repo
+      .createQueryBuilder('o')
+      .select('min(o.next_attempt_at)', 'next')
+      .where("o.status IN ('PENDING', 'FAILED') AND o.attempts < o.max_attempts")
+      .getRawOne<{ next: Date | null }>();
+    return row?.next ?? null;
   }
 
   async list(filter: OutboxFilter = {}): Promise<OutboxMessage[]> {
-    const where: string[] = [];
-    const params: unknown[] = [];
-    if (filter.status) {
-      params.push(filter.status);
-      where.push(`status = $${params.length}`);
-    }
-    if (filter.claimId) {
-      params.push(filter.claimId);
-      where.push(`claim_id = $${params.length}`);
-    }
-    const { rows } = await this.db.query(
-      `SELECT ${COLUMNS} FROM outbox ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id`,
-      params,
-    );
+    const rows = await this.repo.find({
+      where: {
+        ...(filter.status ? { status: filter.status } : {}),
+        ...(filter.claimId ? { claim_id: filter.claimId } : {}),
+        ...(filter.effectType ? { effect_type: filter.effectType } : {}),
+      },
+      order: { id: 'ASC' },
+    });
     return rows.map(rowToMessage);
   }
 
+  async retryAllDead(now: Date, filter: Omit<OutboxFilter, 'status'> = {}): Promise<number> {
+    const r = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({ status: 'PENDING', attempts: 0, next_attempt_at: now.toISOString(), last_error: null })
+      .where({
+        status: 'DEAD',
+        ...(filter.claimId ? { claim_id: filter.claimId } : {}),
+        ...(filter.effectType ? { effect_type: filter.effectType } : {}),
+      })
+      .updateEntity(false)
+      .execute();
+    return r.affected ?? 0;
+  }
+
   async retryDead(id: number, now: Date): Promise<boolean> {
-    const r = await this.db.query(
-      `UPDATE outbox
-          SET status = 'PENDING', attempts = 0, next_attempt_at = $2, last_error = NULL
-        WHERE id = $1 AND status = 'DEAD'`,
-      [id, now.toISOString()],
-    );
-    return r.rowCount === 1;
+    const r = await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({ status: 'PENDING', attempts: 0, next_attempt_at: now.toISOString(), last_error: null })
+      .where({ id, status: 'DEAD' })
+      .updateEntity(false)
+      .execute();
+    return r.affected === 1;
   }
 }
 
-/** LISTEN on a connection of its own; only notifications for `schema` wake the listener. */
+/**
+ * LISTEN on a connection of its own from the data source's pool; only notifications for
+ * `schema` wake the listener. TypeORM has no LISTEN API, so this uses the pg client directly.
+ */
 export class PgOutboxNotifications implements OutboxNotifications {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly dataSource: DataSource,
     private readonly schema: string,
   ) {}
 
@@ -181,7 +240,8 @@ export class PgOutboxNotifications implements OutboxNotifications {
     onNotify: () => void;
     onError: (error: Error) => void;
   }): Promise<OutboxSubscription> {
-    const listener = await this.pool.connect();
+    const pool = (this.dataSource.driver as unknown as { master: pg.Pool }).master;
+    const listener = await pool.connect();
     const onNotification = (n: pg.Notification) => {
       if (n.channel === OUTBOX_CHANNEL && n.payload === this.schema) handlers.onNotify();
     };

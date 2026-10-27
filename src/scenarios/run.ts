@@ -124,7 +124,12 @@ async function main() {
   const base = await createApp({ configPath: args.config, schema, clock, newId });
   let extension: AppContext | undefined;
   const logs: string[] = [];
-  const worker = base.createWorker({ workerId: 'scenario-worker', log: (line) => logs.push(line) });
+  // Fixed jitter: retry times, and so the written results, are the same on every run.
+  const worker = base.createWorker({
+    workerId: 'scenario-worker',
+    log: (line) => logs.push(line),
+    random: () => 0.5,
+  });
   const scenarioEnv: ScenarioEnv = {
     base,
     clock,

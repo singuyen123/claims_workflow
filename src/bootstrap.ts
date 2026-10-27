@@ -1,16 +1,16 @@
 // Composition root: the only module that wires PostgreSQL implementations into the services.
 import { randomUUID } from 'node:crypto';
-import type pg from 'pg';
+import type { DataSource } from 'typeorm';
 import { type CompiledWorkflow, loadWorkflowFile } from './engine/load';
-import { migrate } from './infra/db/migrate';
-import { createPool } from './infra/db/pool';
 import { env } from './infra/env';
 import { loadSeed } from './infra/seed-file';
 import {
   createSchema,
   dropSchema as dropSchemaIn,
+  runMigrations,
   upsertReference,
 } from './repositories/postgres/admin';
+import { createDataSource } from './repositories/postgres/data-source';
 import { PgOutboxNotifications } from './repositories/postgres/outbox-repository';
 import { PgUnitOfWork } from './repositories/postgres/unit-of-work';
 import { ClaimQueryService } from './services/claim-query-service';
@@ -24,11 +24,14 @@ import { WorkflowService } from './services/workflow-service';
 export type { Services };
 
 /** Options of an outbox worker that callers may set (the rest comes from the app). */
-export type WorkerSettings = Omit<WorkerOptions, 'outbox' | 'notifications' | 'gateway' | 'clock'>;
+export type WorkerSettings = Omit<
+  WorkerOptions,
+  'outbox' | 'notifications' | 'audit' | 'auditKey' | 'gateway' | 'clock'
+>;
 
 export interface AppContext {
-  /** Runtime-role pool, for tests and demos that check database privileges directly. */
-  pool: pg.Pool;
+  /** Runtime-role data source; for tests. Controllers only get `services`. */
+  dataSource: DataSource;
   schema: string;
   clock: Clock;
   workflow: CompiledWorkflow;
@@ -57,8 +60,9 @@ export async function createApp(options: AppOptions = {}): Promise<AppContext> {
   const clock = options.clock ?? systemClock;
   // One generator for writes and dry runs, so reproducible ids stay reproducible.
   const newId = options.newId ?? randomUUID;
-  const pool = createPool(options.databaseUrl ?? env.databaseUrl(), schema);
-  const store = new PgUnitOfWork(pool);
+  const dataSource = createDataSource(options.databaseUrl ?? env.databaseUrl(), schema);
+  await dataSource.initialize();
+  const store = new PgUnitOfWork(dataSource);
   const auditKey = env.auditKey();
   const workflows = new WorkflowService(workflow, store.repos.definitions, clock);
   const services: Services = {
@@ -70,18 +74,18 @@ export async function createApp(options: AppOptions = {}): Promise<AppContext> {
       newId,
       ...(options.onAutomatic ? { onAutomatic: options.onAutomatic } : {}),
     }),
-    queries: new ClaimQueryService({ repos: store.repos, workflows, auditKey, clock, newId }),
+    queries: new ClaimQueryService({ store, workflows, auditKey, clock, newId }),
     workflows,
     operations: new OperationsService(store.repos, clock),
   };
   try {
     await workflows.register();
   } catch (error) {
-    await pool.end();
+    await dataSource.destroy();
     throw error;
   }
   return {
-    pool,
+    dataSource,
     schema,
     clock,
     workflow,
@@ -90,11 +94,13 @@ export async function createApp(options: AppOptions = {}): Promise<AppContext> {
       new OutboxWorker({
         ...settings,
         outbox: store.repos.outbox,
-        notifications: new PgOutboxNotifications(pool, schema),
+        notifications: new PgOutboxNotifications(dataSource, schema),
+        audit: store.repos.audit,
+        auditKey,
         gateway: store.repos.mockGateway,
         clock,
       }),
-    close: () => pool.end(),
+    close: () => dataSource.destroy(),
   };
 }
 
@@ -103,20 +109,22 @@ export async function createApp(options: AppOptions = {}): Promise<AppContext> {
 async function asOwner<T>(
   ownerUrl: string,
   schema: string,
-  fn: (owner: pg.Pool) => Promise<T>,
+  fn: (owner: DataSource) => Promise<T>,
 ): Promise<T> {
-  const owner = createPool(ownerUrl, schema, 1);
+  const owner = createDataSource(ownerUrl, schema, 2);
+  await owner.initialize();
   try {
     return await fn(owner);
   } finally {
-    await owner.end();
+    await owner.destroy();
   }
 }
 
+/** Creates the schema if needed and applies pending migrations. */
 export function migrateSchema(ownerUrl = env.ownerUrl(), schema = env.schema()) {
   return asOwner(ownerUrl, schema, async (owner) => {
     await createSchema(owner, schema);
-    return migrate(owner);
+    return runMigrations(owner);
   });
 }
 
