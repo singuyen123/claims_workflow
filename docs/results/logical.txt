@@ -40,3 +40,8 @@ Tôi sẽ chọn phương án làn linh hoạt để chia làn cho cây xăn
 Chuyển khoản sẽ mất nhiều thời gian hơn so với tiền mặt, nhưng nếu chuẩn bị trước thì tốc độ sẽ ngang nhau. do đó tôi sẽ đặt sẵn mã QR trên làn đợi đổ xăng.
 Trường hợp xấu nhất người chuyển khoản không quét mã trước thì tôi sẽ setup thêm 1 mã qr ở làn ra để người dùng di chuyển ra trước rồi thực hiện thanh toán sau.
 Thay vì yêu cầu khách hàng thay đổi hoàn toàn thói quen, thiết kế điều chỉnh môi trường và quy trình phục vụ để khách hàng có thể đổ xăng nhanh hơn với ít thao tác phát sinh nhất.
+
+q9: Những tiêu chí bắc buộc phải có ở một nhà vệ sinh công cộng là: tiện lợi, riêng tư, sách sẽ. Tôi sẽ thiết kế cửa nhà vệ sinh chú trọng vào những tiêu chí trên
+- Tôi sẽ chọn không lấp cửa vì tiêu chí đầu tiên của tôi là tiện lợi. Tiện lợi là vì nhà vì nhà vệ sinh công cộng sẽ có rất nhiều người ra vào. Nhiều người sử dụng cùng một thời điểm có thể gây và chạm.
+- Để đảm bảo riêng thì thay vì lấp cửa tôi sẽ chọn giải pháp thiết kế hành lang đi vào nhà vs sao cho che được của nhà vệ sinh
+- Để đảm bảo sạch sẽ thì không lấp cửa là tối ưu nhất vì cửa nhà vệ sinh sẽ có rất nhiều vi khuẩn do phải tiếp xúc với nhiều người vừa đi vệ sinh xong. Người dùng sẽ không muốn phải chạm tay vào mở cửa khi vừa rửa tay xong.
