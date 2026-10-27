@@ -15,6 +15,7 @@ or a small web UI.
 | New state by config only, with the diff | [`docs/extending-the-workflow.md`](docs/extending-the-workflow.md), commit `f2522b3` |
 | Tests | 170: 120 unit, 50 integration on PostgreSQL ([`test-report.txt`](docs/results/test-report.txt)) |
 | Design, domain research, AI workflow | [`docs/design.md`](docs/design.md), [`docs/domain-research.md`](docs/domain-research.md), [`docs/ai-workflow.md`](docs/ai-workflow.md) |
+| Logical thinking answers (Vietnamese) | [`docs/results/logical.txt`](docs/results/logical.txt) |
 
 ## Quick start
 
