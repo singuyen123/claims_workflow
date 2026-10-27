@@ -30,13 +30,19 @@ export const env = {
   testUrl: () => required('TEST_DATABASE_URL'),
   schema: () => optional('DB_SCHEMA', 'claims'),
   workflowConfig: () => optional('WORKFLOW_CONFIG', 'config/workflow.yaml'),
+  /**
+   * The audit chain's HMAC key. There is no fallback: a key anyone can read in the source would
+   * let anyone with write access to the database re-sign a rewritten history.
+   */
   auditKey: () => {
-    loadEnv();
-    const key = process.env.AUDIT_HMAC_KEY;
-    if (!key) {
-      process.emitWarning('AUDIT_HMAC_KEY is not set; using an insecure development key.');
-      return 'dev-only-insecure-key';
+    const key = required('AUDIT_HMAC_KEY');
+    if (key.length < 16) throw new Error('AUDIT_HMAC_KEY must be at least 16 characters long.');
+    if (process.env.NODE_ENV === 'production' && PUBLISHED_KEYS.has(key)) {
+      throw new Error('AUDIT_HMAC_KEY is an example value from this repository; set a secret one.');
     }
     return key;
   },
 };
+
+/** Keys printed in .env.example and the CI workflow. */
+const PUBLISHED_KEYS = new Set(['dev-only-change-me', 'ci-only-not-secret']);

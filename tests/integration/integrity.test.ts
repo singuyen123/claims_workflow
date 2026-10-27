@@ -31,7 +31,7 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
     claimNo = await d.submit();
     await d.toAssessment(claimNo);
     await d.fail(claimNo, 'approve', 'u_assessor_02'); // row triggers need rows to fire on
-    claimId = (await d.service.requireClaim(claimNo)).id;
+    claimId = (await d.services.queries.requireClaim(claimNo)).id;
   });
   afterAll(() => db?.close());
 
@@ -50,7 +50,7 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
   });
 
   it('the runtime role has no UPDATE or DELETE privilege on the audit trail and claims', async () => {
-    const app = db.app.pool;
+    const app = db.appPool;
     await expect(app.query(`UPDATE audit_log SET reason = 'edited'`)).rejects.toMatchObject({
       code: '42501',
     });
@@ -64,8 +64,40 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
     });
   });
 
+  it('the runtime role can only move an outbox message through its delivery states', async () => {
+    await expect(
+      db.appPool.query(`UPDATE outbox SET payload = '{}' WHERE claim_id = $1`, [claimId]),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      db.appPool.query(`UPDATE outbox SET idempotency_key = 'k' WHERE claim_id = $1`, [claimId]),
+    ).rejects.toMatchObject({ code: '42501' });
+    const moved = await db.appPool.query(
+      `UPDATE outbox SET last_error = 'probe' WHERE claim_id = $1`,
+      [claimId],
+    );
+    expect(moved.rowCount).toBeGreaterThan(0);
+  });
+
+  it('nobody can change what an outbox message says, or reopen a delivered one', async () => {
+    await expect(
+      db.owner.query(`UPDATE outbox SET payload = '{}' WHERE claim_id = $1`, [claimId]),
+    ).rejects.toThrow(/cannot change: only its delivery state moves/);
+    await expect(
+      db.owner.query(
+        `UPDATE outbox SET status = 'DONE', processed_at = created_at WHERE claim_id = $1`,
+        [claimId],
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      db.owner.query(
+        `UPDATE outbox SET status = 'PENDING', processed_at = NULL WHERE claim_id = $1`,
+        [claimId],
+      ),
+    ).rejects.toThrow(/was delivered and cannot be reopened/);
+  });
+
   it('a claim cannot change without its audit entry: the deferred check fails the commit', async () => {
-    const client = await db.app.pool.connect();
+    const client = await db.appPool.connect();
     try {
       await client.query('BEGIN');
       await client.query(
@@ -76,7 +108,7 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
     } finally {
       client.release();
     }
-    expect((await d.service.requireClaim(claimId)).data.assessor_id).toBe('u_assessor_01');
+    expect((await d.services.queries.requireClaim(claimId)).data.assessor_id).toBe('u_assessor_01');
   });
 
   it('versions move one step at a time and identity columns are immutable', async () => {
@@ -99,7 +131,7 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
   });
 
   it('CHECK constraints reject malformed rows', async () => {
-    const claim = await d.service.requireClaim(claimId);
+    const claim = await d.services.queries.requireClaim(claimId);
     await expect(
       db.owner.query(
         `INSERT INTO claims (id, claim_no, config_hash, policy_id, member_id, claim_type, claimed_amount,
@@ -121,7 +153,7 @@ describe.skipIf(!hasDatabase)('database guarantees', () => {
     ]);
     expect(rows[0].assessor_id).toBe('u_assessor_01');
     expect(
-      (await d.service.listClaims({ assessorId: 'u_assessor_01' })).map((c) => c.id),
+      (await d.services.queries.listClaims({ assessorId: 'u_assessor_01' })).map((c) => c.id),
     ).toContain(claimId);
   });
 });
@@ -140,12 +172,12 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
     const claimNo = await d.submit();
     await d.toAssessment(claimNo);
     await d.assess(claimNo, 2_000_000);
-    return d.service.requireClaim(claimNo);
+    return d.services.queries.requireClaim(claimNo);
   }
 
   it('an untouched claim verifies', async () => {
     const claim = await freshClaim();
-    const report = await d.service.verify(claim.claim_no);
+    const report = await d.services.queries.verify(claim.claim_no);
     expect(report).toMatchObject({ ok: true, issues: [], entries: claim.version });
   });
 
@@ -157,7 +189,7 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
       `UPDATE claims SET data = jsonb_set(data, '{assessment,approved_amount}', '90000000') WHERE id = $1`,
       [claim.id],
     );
-    const report = await d.service.verify(claim.claim_no);
+    const report = await d.services.queries.verify(claim.claim_no);
     expect(report.ok).toBe(false);
     expect(report.issues).toEqual([
       expect.objectContaining({
@@ -175,7 +207,7 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
       `UPDATE audit_log SET actor_user_id = 'u_lead_01' WHERE claim_id = $1 AND claim_seq = 2`,
       [claim.id],
     );
-    const report = await d.service.verify(claim.claim_no);
+    const report = await d.services.queries.verify(claim.claim_no);
     expect(report.issues.map((i) => [i.code, i.claim_seq])).toEqual([['ENTRY_TAMPERED', 2]]);
   });
 
@@ -187,7 +219,7 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
       'DELETE FROM audit_log WHERE claim_id = $1 AND claim_seq = 3',
       [claim.id],
     );
-    const codes = (await d.service.verify(claim.claim_no)).issues.map((i) => i.code);
+    const codes = (await d.services.queries.verify(claim.claim_no)).issues.map((i) => i.code);
     expect(codes).toContain('SEQUENCE_GAP');
     expect(codes).toContain('CHAIN_BROKEN');
   });
@@ -200,9 +232,22 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
       `UPDATE audit_log SET changes = '[]' WHERE claim_id = $1 AND claim_seq = 2`,
       [claim.id],
     );
-    const codes = (await d.service.verify(claim.claim_no)).issues.map((i) => i.code);
+    const codes = (await d.services.queries.verify(claim.claim_no)).issues.map((i) => i.code);
     expect(codes).toContain('ENTRY_TAMPERED');
     expect(codes).toContain('REPLAY_MISMATCH');
+  });
+
+  it('an outbox message edited behind the engine no longer matches its audit entry', async () => {
+    const claim = await freshClaim();
+    await tamper(
+      db.owner,
+      'outbox',
+      `UPDATE outbox SET payload = jsonb_set(payload, '{body}', '"edited"')
+        WHERE claim_id = $1 AND effect_type = 'notify'`,
+      [claim.id],
+    );
+    const report = await d.services.queries.verify(claim.claim_no);
+    expect(new Set(report.issues.map((i) => i.code))).toEqual(new Set(['OUTBOX_TAMPERED']));
   });
 
   it('a modified workflow definition is detected (runs last: it taints the shared definition)', async () => {
@@ -215,7 +260,7 @@ describe.skipIf(!hasDatabase)('verify detects tampering', () => {
         WHERE config_hash = $1`,
       [claim.config_hash],
     );
-    const report = await d.service.verify(claim.claim_no);
+    const report = await d.services.queries.verify(claim.claim_no);
     expect(report.issues.map((i) => i.code)).toEqual(['DEFINITION_TAMPERED']);
   });
 });

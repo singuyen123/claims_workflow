@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DAY } from '../../src/app/clock';
+import { DAY } from '../../src/services/clock';
 import { createTestDb, Driver, hasDatabase, type TestDb } from '../helpers/pg-schema';
 
 const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -29,7 +29,7 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
       'PAYMENT_INITIATED',
       'CLOSED',
     ]);
-    const { claim, entries } = await d.service.audit(claimNo);
+    const { claim, entries } = await d.services.queries.audit(claimNo);
     expect(entries.map((e) => e.claim_seq)).toEqual(entries.map((_, i) => i + 1));
     expect(entries.at(-1)).toMatchObject({
       transition_id: 'close_paid',
@@ -39,14 +39,14 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
       actor_role: 'finance',
       notes: 'Paid in full',
       claim_version: claim.version,
-      config_hash: d.service.workflow.hash,
+      config_hash: d.services.workflows.current.hash,
     });
     for (const e of entries) {
       expect(e.occurred_at).toMatch(ISO_MS);
       expect(e.changes.length).toBeGreaterThan(0);
-      expect(e.decision_context).toMatchObject({ config_hash: d.service.workflow.hash });
+      expect(e.decision_context).toMatchObject({ config_hash: d.services.workflows.current.hash });
     }
-    const report = await d.service.verify(claimNo);
+    const report = await d.services.queries.verify(claimNo);
     expect(report.issues).toEqual([]);
   });
 
@@ -60,7 +60,7 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
 
     expect(ack.automatic.map((a) => a.entry.transition_id)).toEqual(['close_rejected']);
     expect(ack.claim.state).toBe('CLOSED');
-    const { entries } = await d.service.audit(claimNo);
+    const { entries } = await d.services.queries.audit(claimNo);
     expect(entries.find((e) => e.transition_id === 'reject')?.reason).toBe(reason);
     expect(entries.at(-1)).toMatchObject({
       transition_id: 'close_rejected',
@@ -85,14 +85,15 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
       reason: 'Waiting period',
     });
 
-    expect(await d.service.runSystem(claimNo)).toEqual([]);
+    expect(await d.services.claims.runSystem(claimNo)).toEqual({ results: [], failures: [] });
     db.clock.advance(31 * DAY);
-    const results = await d.service.runSystem();
+    const { results, failures } = await d.services.claims.runSystem();
+    expect(failures).toEqual([]);
     expect(results.map((r) => [r.claim.claim_no, r.entry.transition_id])).toContainEqual([
       claimNo,
       'close_rejected',
     ]);
-    expect((await d.service.requireClaim(claimNo)).state).toBe('CLOSED');
+    expect((await d.services.queries.requireClaim(claimNo)).state).toBe('CLOSED');
   });
 
   it('scenario 3, information loop: back to verification, timer reset, counted, then paid', async () => {
@@ -144,7 +145,7 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
 
     expect(error.code).toBe('CYCLE_LIMIT_EXCEEDED');
     expect(error.message).toBe('Maximum information requests exceeded — escalate to team lead');
-    const claim = await d.service.requireClaim(claimNo);
+    const claim = await d.services.queries.requireClaim(claimNo);
     expect(claim.state).toBe('UNDER_ASSESSMENT');
     expect(claim.counters).toEqual({ info_requests: 3 });
   });
@@ -154,14 +155,14 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
     const error = await d.fail(claimNo, 'approve', 'u_assessor_01');
 
     expect(error.code).toBe('INVALID_TRANSITION');
-    expect(error.message).toContain('claim is SUBMITTED');
+    expect(error.message).toContain(`claim ${claimNo} is SUBMITTED`);
     expect(error.details.path_to_target).toEqual([
       'verify_documents',
       'start_assessment',
       'approve',
     ]);
     expect(error.details.available?.map((a) => a.transition)).toContain('verify_documents');
-    expect((await d.service.requireClaim(claimNo)).version).toBe(1);
+    expect((await d.services.queries.requireClaim(claimNo)).version).toBe(1);
   });
 
   it('scenario 5, unauthorized role: wrong role and role not held are both refused', async () => {
@@ -179,20 +180,20 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
       'document_clerk',
     );
     expect(notHeld.code).toBe('ROLE_NOT_ASSIGNED');
-    expect((await d.service.requireClaim(claimNo)).state).toBe('SUBMITTED');
+    expect((await d.services.queries.requireClaim(claimNo)).state).toBe('SUBMITTED');
   });
 
   it('a failed precondition names what is missing and changes nothing', async () => {
     const claimNo = await d.submit();
     await d.ok(claimNo, 'attach_document', 'u_member_01', { document_type: 'claim_form' });
-    const before = await d.service.requireClaim(claimNo);
+    const before = await d.services.queries.requireClaim(claimNo);
     const error = await d.fail(claimNo, 'verify_documents', 'u_clerk_01');
 
     expect(error.code).toBe('PRECONDITION_FAILED');
     expect(error.details.failures?.[0]).toMatchObject({ code: 'DOCUMENTS_MISSING' });
     expect(error.message).toContain('medical_invoice');
     expect(error.message).toContain('prescription');
-    expect(await d.service.requireClaim(claimNo)).toEqual(before);
+    expect(await d.services.queries.requireClaim(claimNo)).toEqual(before);
   });
 
   it('side effects are queued in the outbox by the same transaction', async () => {
@@ -201,7 +202,7 @@ describe.skipIf(!hasDatabase)('claim lifecycle on PostgreSQL', () => {
     const result = await d.ok(claimNo, 'verify_documents', 'u_clerk_01');
 
     expect(result.outbox_ids).toHaveLength(1);
-    const queued = await db.app.ops.outbox({ claimId: result.claim.id });
+    const queued = await db.app.services.operations.outbox({ claim: result.claim.id });
     const message = queued.find((m) => m.id === result.outbox_ids[0]);
     expect(message).toMatchObject({
       effect_type: 'notify',

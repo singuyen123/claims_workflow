@@ -4,16 +4,10 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import pc from 'picocolors';
-import {
-  type AppContext,
-  createApp,
-  dropSchema,
-  migrateSchema,
-  seedSchema,
-} from '../app/bootstrap';
-import { ManualClock } from '../app/clock';
+import { type AppContext, createApp, dropSchema, migrateSchema, seedSchema } from '../bootstrap';
 import { formatDateTime } from '../engine/templates';
 import { env } from '../infra/env';
+import { ManualClock } from '../services/clock';
 import { type ScenarioEnv, ScenarioRun } from './harness';
 import {
   auditTrailsMarkdown,
@@ -130,7 +124,12 @@ async function main() {
   const base = await createApp({ configPath: args.config, schema, clock, newId });
   let extension: AppContext | undefined;
   const logs: string[] = [];
-  const worker = base.createWorker({ workerId: 'scenario-worker', log: (line) => logs.push(line) });
+  // Fixed jitter: retry times, and so the written results, are the same on every run.
+  const worker = base.createWorker({
+    workerId: 'scenario-worker',
+    log: (line) => logs.push(line),
+    random: () => 0.5,
+  });
   const scenarioEnv: ScenarioEnv = {
     base,
     clock,
@@ -162,14 +161,14 @@ async function main() {
       }
       const trails: ClaimTrail[] = [];
       for (const claimNo of run.claims) {
-        const { claim, entries } = await run.service.audit(claimNo);
-        const wf = await run.service.workflowFor(run.app.pool, claim);
+        const { claim, entries } = await run.services.queries.audit(claimNo);
+        const wf = await run.services.workflows.workflowFor(claim);
         trails.push({
           scenario: scenario.id,
           claim,
           workflow_version: wf.version,
           entries,
-          verify: await run.service.verify(claimNo),
+          verify: await run.services.queries.verify(claimNo),
         });
       }
       const result = { scenario, run, trails };
@@ -203,7 +202,7 @@ async function main() {
       };
       const trails = results.flatMap((r) => r.trails);
       const claimNos = new Map(
-        (await base.service.listClaims({ limit: 10_000 })).map((c) => [c.id, c.claim_no]),
+        (await base.services.queries.listClaims({ limit: 10_000 })).map((c) => [c.id, c.claim_no]),
       );
       mkdirSync(RESULTS_DIR, { recursive: true });
       writeFileSync(join(RESULTS_DIR, 'scenarios.md'), scenariosMarkdown(results, meta));
@@ -226,7 +225,9 @@ async function main() {
       );
       writeFileSync(
         join(RESULTS_DIR, 'denied-attempts.md'),
-        deniedMarkdown(await base.service.denied(), (id) => (id ? (claimNos.get(id) ?? id) : '—')),
+        deniedMarkdown(await base.services.queries.denied(), (id) =>
+          id ? (claimNos.get(id) ?? id) : '—',
+        ),
       );
       console.log(
         pc.dim(

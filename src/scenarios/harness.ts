@@ -1,9 +1,9 @@
-import type { AppContext } from '../app/bootstrap';
-import type { ActResult } from '../app/claim-service';
-import { type ManualClock, MINUTE } from '../app/clock';
-import type { VerifyReport } from '../app/verify';
+import type { AppContext } from '../bootstrap';
 import type { ClaimSnapshot } from '../domain/types';
 import { type Failure, WorkflowError } from '../engine/errors';
+import type { ActResult } from '../services/claim-service';
+import { type ManualClock, MINUTE } from '../services/clock';
+import type { VerifyReport } from '../services/verify';
 
 export type StepKind = 'action' | 'available' | 'system' | 'verify' | 'note';
 
@@ -74,8 +74,8 @@ export class ScenarioRun {
     return this.current;
   }
 
-  get service() {
-    return this.current.service;
+  get services() {
+    return this.current.services;
   }
 
   /** Switches new claims to the extended workflow; existing claims keep their pinned version. */
@@ -120,7 +120,7 @@ export class ScenarioRun {
       ...(claim ? { claim } : {}),
     };
     try {
-      const result = await this.service.act({
+      const result = await this.services.claims.act({
         claim,
         transition_id: transition,
         user_id: user,
@@ -167,7 +167,7 @@ export class ScenarioRun {
 
   /** Records what `user` may do on the claim right now (the "available transitions" view). */
   async available(claimNo: string, user: string): Promise<void> {
-    const { transitions } = await this.service.available(claimNo, user);
+    const { transitions } = await this.services.queries.available(claimNo, user);
     this.steps.push({
       kind: 'available',
       at: this.now(),
@@ -214,7 +214,7 @@ export class ScenarioRun {
 
   /** Runs the scheduler pass that fires time-based automatic transitions. */
   async system(claimNo?: string): Promise<ActResult[]> {
-    const results = await this.service.runSystem(claimNo);
+    const { results } = await this.services.claims.runSystem(claimNo);
     const effects = await this.deliver();
     this.steps.push({
       kind: 'system',
@@ -233,7 +233,7 @@ export class ScenarioRun {
   }
 
   async verify(claimNo: string): Promise<VerifyReport> {
-    const report = await this.service.verify(claimNo);
+    const report = await this.services.queries.verify(claimNo);
     this.steps.push({
       kind: 'verify',
       at: this.now(),
@@ -253,7 +253,7 @@ export class ScenarioRun {
   }
 
   claim(claimNo: string): Promise<ClaimSnapshot> {
-    return this.service.requireClaim(claimNo);
+    return this.services.queries.requireClaim(claimNo);
   }
 
   /** The error of the most recent refused step. */
@@ -268,7 +268,7 @@ export class ScenarioRun {
   ): Promise<string> {
     const result = await this.act(
       null,
-      this.service.workflow.creation.id,
+      this.services.workflows.current.creation.id,
       options.user ?? 'u_member_01',
       {
         policy_id: options.policy ?? 'POL-001',
@@ -283,7 +283,7 @@ export class ScenarioRun {
 
   async attachRequired(claimNo: string, user = 'u_member_01'): Promise<void> {
     const claim = await this.claim(claimNo);
-    const wf = await this.service.workflowFor(this.app.pool, claim);
+    const wf = await this.services.workflows.workflowFor(claim);
     for (const doc of wf.definition.document_requirements[claim.claim_type] ?? []) {
       await this.act(claimNo, 'attach_document', user, {
         document_type: doc,
@@ -324,7 +324,7 @@ export class ScenarioRun {
   }
 
   async expectPath(claimNo: string, states: string[]): Promise<void> {
-    const { entries } = await this.service.audit(claimNo);
+    const { entries } = await this.services.queries.audit(claimNo);
     const path = [entries[0]?.to_state ?? '?'];
     for (const e of entries.slice(1)) if (e.from_state !== e.to_state) path.push(e.to_state);
     this.check(

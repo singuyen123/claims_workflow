@@ -14,8 +14,12 @@ export function levenshtein(a: string, b: string): number {
   return prev[b.length] as number;
 }
 
+/** Longer inputs are not names anyone mistyped; comparing them would only cost time. */
+const MAX_SUGGEST_LENGTH = 64;
+
 /** Closest candidate within a small edit distance, compared case-insensitively. */
 export function closest(input: string, candidates: Iterable<string>): string | undefined {
+  if (input.length > MAX_SUGGEST_LENGTH) return undefined;
   const needle = input.toLowerCase();
   const limit = Math.max(2, Math.floor(input.length / 3));
   let best: { value: string; distance: number } | undefined;

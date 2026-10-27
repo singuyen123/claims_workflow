@@ -15,7 +15,7 @@ how health claims are handled in practice.
 | New loop limit (a named counter with `max` and the refusal message) | workflow YAML |
 | New claim data (`fields`), required documents per claim type, settings such as thresholds | workflow YAML |
 | A new *kind* of condition or effect (say, a fraud score lookup) | a TypeScript primitive in `src/engine`, its type check in `validate.ts`, and a test |
-| A new external system (a real payment gateway or e-mail provider) | an outbox handler in `src/infra/outbox` |
+| A new external system (a real payment gateway or e-mail provider) | an outbox handler in `src/services/effect-handlers.ts` (and a repository for any state it keeps) |
 
 Every change to the workflow file needs a new `workflow.version`: the definition is stored by
 content hash and a claim stays on the definition it was created with (see

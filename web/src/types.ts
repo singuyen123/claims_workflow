@@ -1,4 +1,4 @@
-// Shapes returned by the API (src/api/routes.ts). Domain records are shared with the server.
+// Shapes returned by the API (src/controllers/http/routes.ts). Domain records are shared with the server.
 import type {
   AuditEntry,
   ClaimSnapshot,

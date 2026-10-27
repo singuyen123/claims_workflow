@@ -1,4 +1,3 @@
-import { loadSeed } from '../../src/app/seed';
 import type { ClaimSnapshot } from '../../src/domain/types';
 import {
   availableTransitions,
@@ -10,6 +9,7 @@ import {
   type TransitionPlan,
   WorkflowError,
 } from '../../src/engine';
+import { loadSeed } from '../../src/infra/seed-file';
 
 export const BASE_CONFIG = 'config/workflow.yaml';
 
