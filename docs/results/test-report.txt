@@ -1,0 +1,179 @@
+
+ RUN  v5.0.5 D:/work/papaya
+
+ ✓ tests/unit/read-access.test.ts > read access > lets policyholders see their own claims only, as if others did not exist 4ms
+ ✓ tests/unit/read-access.test.ts > read access > keeps operator data for staff, and refuses unknown viewers 1ms
+ ✓ tests/unit/read-access.test.ts > read access > filters policies to the policyholder 2ms
+ ✓ tests/unit/read-access.test.ts > claim pages > reads every claim, page after page, newest first 1ms
+ ✓ tests/unit/architecture.test.ts > layering > finds the imports it checks 2ms
+ ✓ tests/unit/architecture.test.ts > layering > controllers call services, never repositories or the database 1ms
+ ✓ tests/unit/architecture.test.ts > layering > services reach data only through repository interfaces 1ms
+ ✓ tests/unit/architecture.test.ts > layering > repository interfaces know nothing about PostgreSQL or their callers 1ms
+ ✓ tests/unit/architecture.test.ts > layering > repository implementations do not call back into services or controllers 0ms
+ ✓ tests/unit/architecture.test.ts > layering > only the PostgreSQL repositories, migrations and the composition root use TypeORM 0ms
+ ✓ tests/unit/architecture.test.ts > layering > only the HTTP controller validates requests with class models 0ms
+ ✓ tests/unit/architecture.test.ts > layering > the engine only depends on itself and the domain types 0ms
+ ✓ tests/unit/engine.test.ts > valid transitions > happy path: SUBMITTED → DOCUMENTS_VERIFIED → UNDER_ASSESSMENT → APPROVED → PAYMENT_INITIATED → CLOSED 154ms
+ ✓ tests/unit/extension.test.ts > extending the workflow through config only (v2: appeals) > adds a state and transitions on top of v1 165ms
+ ✓ tests/unit/recipes.test.ts > recipes in docs/extending-the-workflow.md > the guide contains the recipes 3ms
+ ✓ tests/unit/recipes.test.ts > recipes in docs/extending-the-workflow.md > request-documents is a valid change to the shipped workflow 97ms
+ ✓ tests/unit/engine.test.ts > valid transitions > rejection path closes automatically when the member acknowledges 69ms
+ ✓ tests/unit/engine.test.ts > valid transitions > a rejected claim closes only after the appeal period when not acknowledged 67ms
+ ✓ tests/unit/config.test.ts > workflow config: loading and hashing > the shipped config is valid and produces no warnings 94ms
+ ✓ tests/unit/config.test.ts > workflow config: loading and hashing > the hash ignores formatting, comments and key order but not content 183ms
+ ✓ tests/unit/extension.test.ts > extending the workflow through config only (v2: appeals) > runs an appeal end to end: a different assessor reviews and approves 123ms
+ ✓ tests/unit/outbox-integrity.test.ts > outbox against the audit chain > accepts the messages the chain recorded 198ms
+ ✓ tests/unit/recipes.test.ts > recipes in docs/extending-the-workflow.md > payment-failed is a valid change to the shipped workflow 58ms
+ ✓ tests/unit/recipes.test.ts > recipes in docs/extending-the-workflow.md > escalation is a valid change to the shipped workflow 49ms
+ ✓ tests/unit/retry-policy.test.ts > retry policy > doubles the delay up to the cap, with up to half of it random 3ms
+ ✓ tests/unit/retry-policy.test.ts > retry policy > keeps retrying a payment for hours, notifications for minutes 1ms
+ ✓ tests/unit/engine.test.ts > valid transitions > request-more-info loop returns to assessment and is counted 51ms
+ ✓ tests/unit/engine.test.ts > invalid transitions > rejects SUBMITTED → APPROVED with the available moves and the path to APPROVED 30ms
+ ✓ tests/unit/engine.test.ts > invalid transitions > suggests the closest transition for a typo 37ms
+ ✓ tests/unit/recipes.test.ts > recipes in docs/extending-the-workflow.md > withdrawal is a valid change to the shipped workflow 79ms
+ ✓ tests/unit/config.test.ts > workflow config: loading and hashing > round-trips through stored content and detects a tampered definition 48ms
+ ✓ tests/unit/config.test.ts > workflow config: loading and hashing > reports YAML syntax errors with a line number 3ms
+ ✓ tests/unit/config.test.ts > workflow config: loading and hashing > generates a Mermaid diagram from the config 38ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > rejects unknown keys (typos) with the location 28ms
+ ✓ tests/unit/outbox-integrity.test.ts > outbox against the audit chain > reports a payment whose amount was changed after the fact 48ms
+ ✓ tests/unit/outbox-integrity.test.ts > outbox against the audit chain > reports a message no entry queued, and a queued message that is gone 46ms
+ ✓ tests/unit/outbox-integrity.test.ts > outbox worker > delivers messages their audit entry vouches for 54ms
+ ✓ tests/unit/extension.test.ts > extending the workflow through config only (v2: appeals) > the assessor who rejected the claim cannot review the appeal 64ms
+ ✓ tests/unit/extension.test.ts > extending the workflow through config only (v2: appeals) > allows one appeal per claim, inside the appeal window 103ms
+ ✓ tests/unit/outbox-integrity.test.ts > outbox worker > refuses a payment that differs from its entry, or whose entry was re-signed 42ms
+ ✓ tests/unit/engine.test.ts > invalid transitions > refuses any transition on a closed claim 35ms
+ ✓ tests/unit/engine.test.ts > invalid transitions > refuses an in-state action outside its states 24ms
+ ✓ tests/unit/engine.test.ts > preconditions > lists the missing documents when verifying an incomplete claim 34ms
+ ✓ tests/unit/engine.test.ts > preconditions > requires an assigned assessor before assessment starts 26ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > rejects references to unknown states and roles, with suggestions 31ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > type-checks every $path and suggests the intended one 26ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > reports a broken shared rule once, naming every transition that uses it 22ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > rejects inputs a transition does not declare 18ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > rejects comparisons between incompatible types 22ms
+ ✓ tests/unit/extension.test.ts > extending the workflow through config only (v2: appeals) > is rejected at load time if the new cycle is not bounded by a counter 50ms
+ ✓ tests/unit/engine.test.ts > preconditions > refuses approval above the policy limit 33ms
+ ✓ tests/unit/engine.test.ts > preconditions > requires a rejection reason and code 30ms
+ ✓ tests/unit/engine.test.ts > preconditions > requires a description of the missing information 28ms
+ ✓ tests/unit/engine.test.ts > preconditions > does not return to verification until something new arrives 25ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > checks enum literals 26ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > rejects writes of the wrong type and writes to engine-managed columns 25ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > checks template placeholders and filters 20ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > requires every cycle to increment a counter 17ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > rejects unreachable and dead-end states 19ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > requires exactly one well-formed creation transition 20ms
+ ✓ tests/unit/config.test.ts > workflow config: static validation > keeps automatic transitions for service accounts 16ms
+ ✓ tests/unit/engine.test.ts > preconditions > does not close a paid claim before payment is confirmed 30ms
+ ✓ tests/unit/engine.test.ts > preconditions > reports every failed precondition at once, without follow-on noise 21ms
+ ✓ tests/unit/engine.test.ts > preconditions > reports independent failures together 24ms
+ ✓ tests/unit/engine.test.ts > preconditions > rejects malformed input before evaluating rules 20ms
+ ✓ tests/unit/engine.test.ts > preconditions > keeps a refusal small whatever the request sends 20ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > maps headers and body of a new claim to the service request 26ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > treats a missing body, null and empty values as absent 3ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > takes the claim and the transition from the path 3ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > keeps every key of the input as sent 2ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > reads only the named headers 2ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"constructor":1} 4ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"hasOwnProperty":1} 3ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"isPrototypeOf":1} 2ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"input":"x"} 2ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"input":[]} 2ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"expected_version":0} 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"expected_version":1.5} 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"idempotency_key":7} 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body {"inputs":{}} 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the body [1] 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > requires the acting user before looking at the body 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > reads the claim list query, for the acting user 3ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query limit=0 with one message 2ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query limit=501 with one message 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query limit=ten with one message 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query limit=0x10 with one message 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query limit=1e2 with one message 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query limit=-5 with one message 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query state=A,,B 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query state=A&state= 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > refuses the query queue=maybe 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/policies 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims/CLM-2 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims/CLM-2/audit 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims/CLM-2/denied 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims/CLM-2/verify 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims/CLM-2/notifications 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for GET /api/claims/CLM-2/outbox 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > needs the acting user for POST /api/system/run 1ms
+ ✓ tests/unit/http-requests.test.ts > HTTP request models > passes the acting user to every claim read 1ms
+ ✓ tests/unit/engine.test.ts > preconditions > treats names of inherited members as unknown inputs 19ms
+ ✓ tests/unit/engine.test.ts > preconditions > records the hash of each outbox payload in the audit effects 23ms
+ ✓ tests/unit/engine.test.ts > preconditions > checks policy cover and the filing deadline at submission 22ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > refuses a transition from the wrong role 20ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > refuses a role the user does not hold 20ms
+ ✓ tests/unit/migrations.test.ts > migrations > are append-only: an applied migration file never changes 6ms
+ ✓ tests/unit/migrations.test.ts > migrations > are all registered, oldest first, under the name their file gives 1ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > keeps system transitions for the service account 29ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > only the assigned assessor can decide 21ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > segregation of duties: whoever verified the documents cannot assess 22ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > segregation of duties: whoever approved cannot initiate the payment 17ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > four-eyes: large approvals need a team lead co-sign for the exact amount 24ms
+ ✓ tests/unit/engine.test.ts > role-based and attribute-based authorization > members act only on their own policies and claims 19ms
+ ✓ tests/unit/engine.test.ts > cycle limit > allows three information requests and refuses the fourth with the escalation message 22ms
+ ✓ tests/unit/engine.test.ts > cycle limit > decides from the claim snapshot alone, without reading history 12ms
+ ✓ tests/unit/engine.test.ts > transition plan > records a replayable patch, the snapshot hash and the decision context 14ms
+ ✓ tests/unit/engine.test.ts > transition plan > renders notifications and keys the payment by claim and payment request 17ms
+ ✓ tests/unit/engine.test.ts > transition plan > dry-runs the available transitions with a checklist 20ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > a refused transition leaves nothing in the outbox 107ms
+ ✓ tests/integration/concurrency.test.ts > concurrency and idempotency > concurrent decisions on one claim are serialised: exactly one wins 214ms
+ ✓ tests/integration/entities.test.ts > TypeORM entities > map every column of every table, with its type and nullability 165ms
+ ✓ tests/integration/registry.test.ts > workflow versions and pinning > changing a workflow without bumping its version is refused at startup 75ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > scenario 1, happy path: every transition is audited with who, when, why and what changed 181ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > scenario 2, rejection: the reason is audited and the member acknowledgement closes the claim 100ms
+ ✓ tests/integration/concurrency.test.ts > concurrency and idempotency > a stale expected_version is refused with both versions 40ms
+ ✓ tests/integration/concurrency.test.ts > concurrency and idempotency > the same idempotency key sent twice at once runs the creation once 72ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > audit entries cannot be updated, deleted or truncated, even by the schema owner 243ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > two workers never take the same message 199ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > a message whose worker died is taken again after the lease expires 46ms
+ ✓ tests/integration/api.test.ts > HTTP API > creates a claim, runs transitions by id and lists what the user can do 118ms
+ ✓ tests/integration/concurrency.test.ts > concurrency and idempotency > a replayed request adds no audit entry and no side effect 63ms
+ ✓ tests/integration/concurrency.test.ts > concurrency and idempotency > a key reused for a different request or by another user is refused 17ms
+ ✓ tests/integration/concurrency.test.ts > concurrency and idempotency > malformed idempotency keys are refused before touching the database 0ms
+ ✓ tests/integration/api.test.ts > HTTP API > answers refusals with RFC 9457 problem details 32ms
+ ✓ tests/integration/api.test.ts > HTTP API > requires the acting user and a well-formed body 5ms
+ ✓ tests/integration/api.test.ts > HTTP API > replays a request sent again with the same Idempotency-Key header 23ms
+ ✓ tests/integration/api.test.ts > HTTP API > serves the audit trail, refused attempts and the integrity check of a claim 78ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > gateway failures are retried with backoff and the payment is made exactly once 149ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > an unacknowledged rejection closes when the system runs after the appeal window 98ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > scenario 3, information loop: back to verification, timer reset, counted, then paid 131ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > the runtime role has no UPDATE or DELETE privilege on the audit trail and claims 239ms
+ ✓ tests/integration/registry.test.ts > workflow versions and pinning > claims keep the definition they were created under; new claims use the new version 358ms
+ ✓ tests/integration/api.test.ts > HTTP API > shows a policyholder their own claims only, and operator data to staff only 39ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > the fourth information request is refused with the escalation message 126ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > scenario 4, invalid transition: SUBMITTED → APPROVED explains the state and the way there 12ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > scenario 5, unauthorized role: wrong role and role not held are both refused 32ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > a failed precondition names what is missing and changes nothing 21ms
+ ✓ tests/integration/lifecycle.test.ts > claim lifecycle on PostgreSQL > side effects are queued in the outbox by the same transaction 31ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > the runtime role can only move an outbox message through its delivery states 160ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > a payment keeps retrying for hours, then goes DEAD and can be retried by an operator 258ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > nobody can change what an outbox message says, or reopen a delivered one 82ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > a claim cannot change without its audit entry: the deferred check fails the commit 12ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > versions move one step at a time and identity columns are immutable 76ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > a claim can only be in a state of the definition it is pinned to 40ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > CHECK constraints reject malformed rows 72ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > delivering the same payment message twice pays once (idempotent handler) 70ms
+ ✓ tests/integration/outbox.test.ts > outbox delivery > the long-running worker wakes up on NOTIFY from a committed transition 291ms
+ ✓ tests/integration/integrity.test.ts > database guarantees > the generated assessor_id column follows the claim data 136ms
+ ✓ tests/integration/registry.test.ts > refused attempts > are recorded apart from the audit chain and leave the claim unchanged 41ms
+ ✓ tests/integration/registry.test.ts > refused attempts > identical refusals within one minute are stored once 29ms
+ ✓ tests/integration/registry.test.ts > refused attempts > refusals for unknown claims and users are recorded too 10ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > an untouched claim verifies 64ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > a claim row edited behind the engine is reported with the changed fields 78ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > an edited audit entry breaks its HMAC 50ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > a deleted audit entry breaks the sequence and the chain 44ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > a rewritten change set no longer replays to the recorded snapshot 43ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > an outbox message edited behind the engine no longer matches its audit entry 51ms
+ ✓ tests/integration/integrity.test.ts > verify detects tampering > a modified workflow definition is detected (runs last: it taints the shared definition) 58ms
+
+ Test Files  17 passed (17)
+      Tests  170 passed (170)
+   Start at  09:11:09
+   Duration  4.27s (tests 52%, import 44%, transform 3%)
+
